@@ -16,7 +16,9 @@
 from __future__ import annotations
 
 import importlib.metadata
+import re
 import sys
+from pathlib import Path
 
 _CATEGORY_A: frozenset[str] = frozenset(
     {
@@ -26,10 +28,12 @@ _CATEGORY_A: frozenset[str] = frozenset(
         "mit",
         "mit license",
         "mit no attribution",
+        "mit-0",
         "bsd",
         "bsd license",
         "bsd-2-clause",
         "bsd-3-clause",
+        "3-clause bsd",
         "new bsd license",
         "modified bsd license",
         "simplified bsd license",
@@ -38,6 +42,7 @@ _CATEGORY_A: frozenset[str] = frozenset(
         "python software foundation",
         "psf",
         "psf license",
+        "psf-2.0",
         "python license",
         "mpl-2.0",
         "mozilla public license 2.0",
@@ -76,6 +81,29 @@ _CATEGORY_X: frozenset[str] = frozenset(
     }
 )
 
+_NORM_RE = re.compile(r"[-_.]+")
+
+
+def _normalize(name: str) -> str:
+    return _NORM_RE.sub("-", name).lower()
+
+
+def _collect_direct_deps() -> frozenset[str]:
+    project_root = Path(__file__).resolve().parent.parent
+    names: set[str] = set()
+    for req_file in sorted(project_root.glob("**/requirements*.txt")):
+        parts = req_file.parts
+        if any(p.startswith(".") or p in ("venv", ".venv", "env") for p in parts):
+            continue
+        for line in req_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line or line.startswith(("#", "-", ".")):
+                continue
+            pkg = re.split(r"[>=<!;\s\[]", line)[0].strip()
+            if pkg:
+                names.add(_normalize(pkg))
+    return frozenset(names)
+
 
 def _license_from_classifiers(meta: importlib.metadata.PackageMetadata) -> str:
     classifiers: list[str] = meta.get_all("Classifier") or []
@@ -88,21 +116,23 @@ def _license_from_classifiers(meta: importlib.metadata.PackageMetadata) -> str:
 
 def _classify(license_text: str) -> str:
     normalized = license_text.lower()
-    for keyword in _CATEGORY_X:
-        if keyword in normalized:
-            return "RESTRICTED"
     for keyword in _CATEGORY_A:
         if keyword in normalized:
             return "SAFE"
+    for keyword in _CATEGORY_X:
+        if keyword in normalized:
+            return "RESTRICTED"
     return "UNKNOWN"
 
 
-def _scan_installed() -> list[dict]:
+def _scan_direct_deps(direct_dep_names: frozenset[str]) -> list[dict]:
     results: list[dict] = []
     for dist in importlib.metadata.distributions():
         meta = dist.metadata
         name: str | None = meta["Name"]
         if name is None:
+            continue
+        if _normalize(name) not in direct_dep_names:
             continue
         version: str = meta["Version"] or "unknown"
         license_str = (
@@ -141,10 +171,19 @@ def _print_table(results: list[dict]) -> None:
 
 
 def main() -> int:
-    results = _scan_installed()
+    direct_deps = _collect_direct_deps()
+
+    if not direct_deps:
+        print("No requirements*.txt files found — nothing to check.")
+        return 0
+
+    print(f"Checking {len(direct_deps)} direct dependenc(ies): {', '.join(sorted(direct_deps))}")
+    print()
+
+    results = _scan_direct_deps(direct_deps)
 
     if not results:
-        print("No installed packages found. Nothing to check.")
+        print("None of the declared dependencies are currently installed.")
         return 0
 
     _print_table(results)

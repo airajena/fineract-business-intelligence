@@ -1,0 +1,154 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+version: 2
+
+models:
+  - name: stg_m_loan
+    description: >
+      Cleaned and renamed loan account records from raw_m_loan.
+      One row per loan account; all raw columns are preserved with
+      standardised names.
+    columns:
+      - name: loan_id
+        description: Surrogate primary key — renamed from raw id.
+        tests:
+          - not_null
+          - unique
+      - name: client_id
+        description: Foreign key to stg_m_client.
+        tests:
+          - not_null
+      - name: product_id
+        description: Foreign key to stg_m_product_loan.
+        tests:
+          - not_null
+      - name: loan_status_id
+        description: Fineract lifecycle status code.
+        tests:
+          - not_null
+          - accepted_values:
+              values: [100, 200, 300, 400, 500, 600, 601, 602, 700]
+
+  - name: stg_m_client
+    description: >
+      Cleaned client records with PII fields (date_of_birth) removed and
+      replaced by the derived age_band.  client_hash provides a
+      pseudonymised surrogate key safe for downstream use.
+    columns:
+      - name: client_id
+        description: Surrogate primary key — renamed from raw id.
+        tests:
+          - not_null
+          - unique
+      - name: client_hash
+        description: >
+          MD5 hash of (tenant_id || '::' || id) — pseudonymised PK safe
+          for analytics layers.
+        tests:
+          - not_null
+          - unique
+      - name: status_enum
+        description: Client lifecycle status code.
+        tests:
+          - not_null
+          - accepted_values:
+              values: [100, 200, 300, 400, 600]
+      - name: age_band
+        description: Derived age cohort; replaces the raw date_of_birth field.
+        tests:
+          - accepted_values:
+              values: ['Unknown', '18-24', '25-34', '35-44', '45-54', '55+']
+
+  - name: stg_m_loan_transaction
+    description: >
+      Loan transaction events with reversed transactions excluded.
+      All _portion_derived columns are coalesced to 0.
+    columns:
+      - name: loan_transaction_id
+        description: Surrogate primary key — renamed from raw id.
+        tests:
+          - not_null
+          - unique
+      - name: loan_id
+        description: Foreign key to stg_m_loan.
+        tests:
+          - not_null
+      - name: transaction_type_enum
+        description: >
+          Fineract transaction type code: 1=DISBURSEMENT, 2=REPAYMENT,
+          3=CONTRA, 4=WAIVE_INTEREST, 5=REPAYMENT_AT_DISBURSEMENT,
+          6=WRITEOFF, 7=RECOVERY_REPAYMENT, 8=WAIVE_CHARGES.
+        tests:
+          - not_null
+          - accepted_values:
+              values: [1, 2, 3, 4, 5, 6, 7, 8]
+              quote: false
+
+  - name: stg_m_delinquency
+    description: >
+      Denormalised delinquency events joining tag history with range,
+      bucket mapping, and bucket name.  One row per tag-history event.
+    columns:
+      - name: delinquency_event_id
+        description: Surrogate primary key — renamed from tag history id.
+        tests:
+          - not_null
+          - unique
+      - name: loan_id
+        description: Foreign key to stg_m_loan.
+        tests:
+          - not_null
+
+  - name: stg_m_office
+    description: Cleaned office hierarchy records.
+    columns:
+      - name: office_id
+        description: Surrogate primary key — renamed from raw id.
+        tests:
+          - not_null
+          - unique
+      - name: office_name
+        description: Human-readable office name.
+        tests:
+          - not_null
+
+  - name: stg_m_product_loan
+    description: Cleaned loan product template records.
+    columns:
+      - name: product_id
+        description: Surrogate primary key — renamed from raw id.
+        tests:
+          - not_null
+          - unique
+      - name: product_name
+        description: Human-readable product name.
+        tests:
+          - not_null
+
+  - name: stg_m_currency
+    description: Cleaned currency reference records.
+    columns:
+      - name: currency_code
+        description: ISO 4217 currency code — primary key.
+        tests:
+          - not_null
+          - unique
+      - name: currency_name
+        description: Full currency display name.
+        tests:
+          - not_null

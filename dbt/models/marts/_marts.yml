@@ -1,0 +1,172 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+version: 2
+
+models:
+  - name: dim_client
+    description: >
+      Client dimension exposing pseudonymised attributes only.
+      date_of_birth is excluded; age_band is the derived replacement.
+      client_hash is the surrogate primary key safe for analytics use.
+    columns:
+      - name: client_hash
+        description: Pseudonymised surrogate primary key (MD5 of tenant_id + client_id).
+        tests:
+          - not_null
+          - unique
+
+  - name: dim_office
+    description: >
+      Office hierarchy dimension.  office_level is derived from the
+      dot-delimited hierarchy string.
+    columns:
+      - name: office_id
+        description: Surrogate primary key.
+        tests:
+          - not_null
+          - unique
+
+  - name: dim_product
+    description: Loan product dimension containing product templates and default terms.
+    columns:
+      - name: product_id
+        description: Surrogate primary key.
+        tests:
+          - not_null
+          - unique
+
+  - name: dim_date
+    description: >
+      Conformed date dimension spanning historical_start_date to future_end_date.
+      date_key is an integer in YYYYMMDD format for fast joins.
+    columns:
+      - name: date_key
+        description: Integer surrogate key in YYYYMMDD format.
+        tests:
+          - not_null
+          - unique
+
+  - name: dim_delinquency_bucket
+    description: >
+      Delinquency bucket dimension with a synthetic bucket_key=0 row for
+      'Current' (non-delinquent) loans.  Includes CGAP standard_par_band
+      classification and sort_order for ordered reporting.
+    columns:
+      - name: bucket_key
+        description: Surrogate primary key; 0 = Current, -1 reserved for rollups.
+        tests:
+          - not_null
+          - unique
+
+  - name: dim_currency
+    description: Currency reference dimension.
+    columns:
+      - name: currency_code
+        description: ISO 4217 currency code — primary key.
+        tests:
+          - not_null
+          - unique
+
+  - name: fact_loan_snapshot
+    description: >
+      Daily grain fact table capturing each active loan's delinquency
+      status and outstanding balance per snapshot date.  Loaded
+      incrementally with a 120-day lookback delete+insert strategy.
+    columns:
+      - name: snapshot_key
+        description: MD5 surrogate key over (tenant_id, loan_id, snapshot_date).
+        tests:
+          - not_null
+          - unique
+      - name: snapshot_date
+        description: The calendar date of this loan snapshot record.
+        tests:
+          - not_null
+      - name: loan_id
+        description: Foreign key to raw_m_loan.
+        tests:
+          - not_null
+      - name: client_hash
+        description: Pseudonymised client identifier.
+        tests:
+          - relationships:
+              to: ref('dim_client')
+              field: client_hash
+      - name: office_id
+        description: Foreign key to dim_office.
+        tests:
+          - relationships:
+              to: ref('dim_office')
+              field: office_id
+      - name: product_id
+        description: Foreign key to dim_product.
+        tests:
+          - relationships:
+              to: ref('dim_product')
+              field: product_id
+      - name: bucket_key
+        description: Foreign key to dim_delinquency_bucket.
+        tests:
+          - relationships:
+              to: ref('dim_delinquency_bucket')
+              field: bucket_key
+
+  - name: fact_delinquency_event
+    description: >
+      One row per delinquency tag event on a loan.  Includes previous
+      bucket for migration matrix analysis and event duration in days.
+    columns:
+      - name: delinquency_event_key
+        description: MD5 surrogate key over (tenant_id, delinquency_event_id).
+        tests:
+          - not_null
+          - unique
+      - name: loan_id
+        description: Foreign key to raw_m_loan.
+        tests:
+          - not_null
+
+  - name: mart_delinquency_par
+    description: >
+      Primary presentation mart for the Delinquency and PAR Dashboard.
+      Contains CGAP-compliant cumulative PAR ratios, exclusive band
+      amounts, NPA metrics, and average loan outstanding.  Rows are
+      provided at both bucket-level grain and an 'All Portfolio' rollup
+      (bucket_key = -1) per snapshot_date / office / product / currency.
+    columns:
+      - name: snapshot_date
+        description: The calendar date of this reporting snapshot.
+        tests:
+          - not_null
+      - name: office_id
+        description: Foreign key to dim_office.
+        tests:
+          - not_null
+      - name: product_id
+        description: Foreign key to dim_product.
+        tests:
+          - not_null
+      - name: par_30_ratio
+        description: >
+          Cumulative PAR 30 ratio (CGAP standard): outstanding principal
+          of loans >= 30 DPD divided by total portfolio outstanding.
+          Must be between 0 and 1, or null when portfolio is empty.
+        tests:
+          - not_null:
+              config:
+                where: "total_portfolio_amount > 0"
