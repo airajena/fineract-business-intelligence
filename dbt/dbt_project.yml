@@ -15,17 +15,41 @@
 # specific language governing permissions and limitations
 # under the License.
 
-**/node_modules/**
-**/target/**
-**/dist/**
-**/build/**
-.rat-excludes
-LICENSE
-*.jar
-bom.json
-bom.xml
-**/dbt/target/**
-**/dbt/dbt_packages/**
-**/dbt/logs/**
-**/dbt/.user.yml
-**/dbt/profiles.yml
+name: fineract_bi
+version: 1.0.0
+config-version: 2
+
+profile: fineract_bi
+
+model-paths:
+  - models
+
+macro-paths:
+  - macros
+
+clean-targets:
+  - target
+  - dbt_packages
+
+vars:
+  tenant_id: "{{ env_var('TENANT_ID', 'default') }}"
+  historical_start_date: "2010-01-01"
+  future_end_date: "2035-12-31"
+  snapshot_incremental_lookback_days: 120
+
+models:
+  fineract_bi:
+    staging:
+      +schema: staging
+      +materialized: view
+    intermediate:
+      +schema: intermediate
+      +materialized: ephemeral
+    marts:
+      +schema: analytics
+      dimensions:
+        +materialized: table
+      facts:
+        +materialized: incremental
+      presentations:
+        +materialized: table

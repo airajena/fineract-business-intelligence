@@ -15,17 +15,15 @@
 # specific language governing permissions and limitations
 # under the License.
 
-**/node_modules/**
-**/target/**
-**/dist/**
-**/build/**
-.rat-excludes
-LICENSE
-*.jar
-bom.json
-bom.xml
-**/dbt/target/**
-**/dbt/dbt_packages/**
-**/dbt/logs/**
-**/dbt/.user.yml
-**/dbt/profiles.yml
+fineract_bi:
+  target: local
+  outputs:
+    local:
+      type: postgres
+      host: "{{ env_var('PGHOST', 'warehouse') }}"
+      port: "{{ env_var('PGPORT', '5432') | int }}"
+      user: "{{ env_var('PGUSER') }}"
+      password: "{{ env_var('PGPASSWORD') }}"
+      dbname: "{{ env_var('PGDATABASE', 'analytics') }}"
+      schema: analytics
+      threads: 4

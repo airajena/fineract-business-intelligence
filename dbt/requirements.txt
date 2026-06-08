@@ -15,17 +15,4 @@
 # specific language governing permissions and limitations
 # under the License.
 
-**/node_modules/**
-**/target/**
-**/dist/**
-**/build/**
-.rat-excludes
-LICENSE
-*.jar
-bom.json
-bom.xml
-**/dbt/target/**
-**/dbt/dbt_packages/**
-**/dbt/logs/**
-**/dbt/.user.yml
-**/dbt/profiles.yml
+dbt-postgres>=1.7,<2.0

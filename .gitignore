@@ -22,3 +22,8 @@ docker/superset/__pycache__/
 __pycache__/
 bom.json
 bom.xml
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+dbt/.user.yml
+apache-rat-*.jar
