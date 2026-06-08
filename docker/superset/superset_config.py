@@ -13,18 +13,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-extractor/__pycache__/
-docker/superset/__pycache__/
-.env
-.env.local
-.runtime/
-*.pyc
-__pycache__/
-bom.json
-bom.xml
-dbt/target/
-dbt/dbt_packages/
-dbt/logs/
-dbt/.user.yml
-apache-rat-*.jar
-docker/superset/__pycache__/
+import os
+
+
+def require_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"Required environment variable '{name}' is not set.")
+    return value
+
+
+SQLALCHEMY_DATABASE_URI = require_env("SUPERSET_METADATA_URI")
+SECRET_KEY = require_env("SUPERSET_SECRET_KEY")
+
+WTF_CSRF_ENABLED = True
+
+FEATURE_FLAGS = {
+    "ENABLE_TEMPLATE_PROCESSING": True,
+}
+
+ROW_LIMIT = 5000
+SUPERSET_WEBSERVER_ADDRESS = "0.0.0.0"
+SUPERSET_WEBSERVER_PORT = 8088

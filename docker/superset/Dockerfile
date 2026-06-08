@@ -13,18 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-extractor/__pycache__/
-docker/superset/__pycache__/
-.env
-.env.local
-.runtime/
-*.pyc
-__pycache__/
-bom.json
-bom.xml
-dbt/target/
-dbt/dbt_packages/
-dbt/logs/
-dbt/.user.yml
-apache-rat-*.jar
-docker/superset/__pycache__/
+FROM apache/superset:4.1.1
+
+USER root
+
+RUN pip install --no-cache-dir psycopg2-binary==2.9.9
+
+USER superset

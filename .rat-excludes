@@ -29,3 +29,5 @@ bom.xml
 **/dbt/logs/**
 **/dbt/.user.yml
 **/dbt/profiles.yml
+**/docker/superset/__pycache__/**
+**/superset/dashboards/*.json

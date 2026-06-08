@@ -1,0 +1,5 @@
+{
+  "dashboard_title": "Repayment Behavior Dashboard",
+  "slug": "repayment-behavior-dashboard",
+  "description": "Collection efficiency, repayment component breakdown (principal/interest/fees/penalties), and branch/product collection mix for Apache Fineract portfolios."
+}

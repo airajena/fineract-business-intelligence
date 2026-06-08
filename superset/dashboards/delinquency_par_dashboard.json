@@ -1,0 +1,5 @@
+{
+  "dashboard_title": "Delinquency and PAR Dashboard",
+  "slug": "delinquency-par-dashboard",
+  "description": "CGAP/MIX Market standard PAR 30/60/90 ratios, NPA exposure, delinquency bucket distribution, and branch/product breakdown for Apache Fineract portfolios."
+}
