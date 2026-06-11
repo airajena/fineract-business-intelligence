@@ -13,18 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-extractor/__pycache__/
-docker/superset/__pycache__/
-.env
-.env.local
-.runtime/
-*.pyc
-__pycache__/
-bom.json
-bom.xml
-dbt/target/
-dbt/dbt_packages/
-dbt/logs/
-dbt/.user.yml
-apache-rat-*.jar
-docker/superset/__pycache__/
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY dbt/requirements.txt /tmp/dbt-requirements.txt
+RUN pip install --no-cache-dir -r /tmp/dbt-requirements.txt

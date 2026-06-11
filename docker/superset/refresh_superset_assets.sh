@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # Licensed to the Apache Software Foundation (ASF) under one or more
 # contributor license agreements. See the NOTICE file distributed with
 # this work for additional information regarding copyright ownership.
@@ -13,18 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-extractor/__pycache__/
-docker/superset/__pycache__/
-.env
-.env.local
-.runtime/
-*.pyc
-__pycache__/
-bom.json
-bom.xml
-dbt/target/
-dbt/dbt_packages/
-dbt/logs/
-dbt/.user.yml
-apache-rat-*.jar
-docker/superset/__pycache__/
+set -euo pipefail
+
+python /workspace/docker/superset/bootstrap_superset_assets.py

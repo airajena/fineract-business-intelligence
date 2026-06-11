@@ -97,6 +97,61 @@ services:
     working_dir: /app
     command: ["tail", "-f", "/dev/null"]
 
+  dbt:
+    build:
+      context: .
+      dockerfile: docker/dbt/Dockerfile
+    container_name: fineract-bi-dbt
+    depends_on:
+      warehouse:
+        condition: service_healthy
+    environment:
+      PGHOST: warehouse
+      PGPORT: "5432"
+      PGDATABASE: ${WAREHOUSE_DB_NAME:?WAREHOUSE_DB_NAME must be set}
+      PGUSER: ${WAREHOUSE_LOADER_USER:?WAREHOUSE_LOADER_USER must be set}
+      PGPASSWORD: ${WAREHOUSE_LOADER_PASSWORD:?WAREHOUSE_LOADER_PASSWORD must be set}
+      TENANT_ID: ${TENANT_ID:-default}
+      DBT_PROFILES_DIR: /app/dbt
+    volumes:
+      - .:/app
+    working_dir: /app/dbt
+    command: ["tail", "-f", "/dev/null"]
+
+  superset:
+    build:
+      context: .
+      dockerfile: docker/superset/Dockerfile
+    container_name: fineract-bi-superset
+    depends_on:
+      warehouse:
+        condition: service_healthy
+    ports:
+      - "8088:8088"
+    environment:
+      SUPERSET_CONFIG_PATH: /workspace/docker/superset/superset_config.py
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:?SUPERSET_SECRET_KEY must be set}
+      SUPERSET_ADMIN_USERNAME: ${SUPERSET_ADMIN_USERNAME:-admin}
+      SUPERSET_ADMIN_FIRSTNAME: ${SUPERSET_ADMIN_FIRSTNAME:-Admin}
+      SUPERSET_ADMIN_LASTNAME: ${SUPERSET_ADMIN_LASTNAME:-User}
+      SUPERSET_ADMIN_EMAIL: ${SUPERSET_ADMIN_EMAIL:-admin@example.com}
+      SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD:?SUPERSET_ADMIN_PASSWORD must be set}
+      SUPERSET_NORTH_MANAGER_PASSWORD: ${SUPERSET_NORTH_MANAGER_PASSWORD:?SUPERSET_NORTH_MANAGER_PASSWORD must be set}
+      SUPERSET_SOUTH_MANAGER_PASSWORD: ${SUPERSET_SOUTH_MANAGER_PASSWORD:?SUPERSET_SOUTH_MANAGER_PASSWORD must be set}
+      SUPERSET_METADATA_URI: postgresql+psycopg2://${WAREHOUSE_ADMIN_USER:?WAREHOUSE_ADMIN_USER must be set}:${WAREHOUSE_ADMIN_PASSWORD:?WAREHOUSE_ADMIN_PASSWORD must be set}@warehouse:5432/superset_metadata
+      SUPERSET_WAREHOUSE_URI: postgresql+psycopg2://${WAREHOUSE_READER_USER:?WAREHOUSE_READER_USER must be set}:${WAREHOUSE_READER_PASSWORD:?WAREHOUSE_READER_PASSWORD must be set}@warehouse:5432/${WAREHOUSE_DB_NAME:?WAREHOUSE_DB_NAME must be set}
+    volumes:
+      - .:/workspace
+      - superset_home:/app/superset_home
+    command: ["bash", "/workspace/docker/superset/init_superset.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8088/health | grep -q 'OK'"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
 volumes:
   fineract_db_data:
   warehouse_data:
+  superset_home:
