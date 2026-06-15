@@ -170,3 +170,48 @@ models:
           - not_null:
               config:
                 where: "total_portfolio_amount > 0"
+
+  - name: mart_portfolio_health
+    description: >
+      Presentation mart for the Portfolio Health Dashboard.  Provides a
+      daily office / product / currency grain combining point-in-time
+      stock metrics (gross loan portfolio, active loans, active borrowers,
+      principal and interest outstanding, NPA and PAR exposure with their
+      ratios, performing book) with same-day flow metrics (disbursement,
+      collection, write-off).  All amount and count measures are additive
+      across the office / product grain so portfolio-wide totals and
+      ratios are recomputed by summation in the visualization layer; the
+      seed gives each client a single loan so borrower counts remain exact.
+    columns:
+      - name: snapshot_date
+        description: The calendar date of this reporting snapshot.
+        tests:
+          - not_null
+      - name: office_id
+        description: Foreign key to dim_office (the loan's booking office).
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_office')
+              field: office_id
+      - name: product_id
+        description: Foreign key to dim_product.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_product')
+              field: product_id
+      - name: gross_loan_portfolio
+        description: >
+          Active principal outstanding (GLP) — the CGAP standard portfolio
+          size measure.  Sum of principal_outstanding over active loans.
+        tests:
+          - not_null
+      - name: npa_ratio
+        description: >
+          NPA outstanding principal divided by gross loan portfolio.
+          Between 0 and 1, or null when the portfolio is empty.
+        tests:
+          - not_null:
+              config:
+                where: "gross_loan_portfolio > 0"
