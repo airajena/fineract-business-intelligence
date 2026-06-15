@@ -1,5 +1,5 @@
 {
   "dashboard_title": "Portfolio Health Dashboard",
   "slug": "portfolio-health-dashboard",
-  "description": "Gross loan portfolio, active borrower trends, daily disbursement activity, and NPA outstanding for Apache Fineract portfolios."
+  "description": "Gross loan portfolio composition, growth and borrower trends, principal versus interest exposure, disbursement and collection flow, and branch/product concentration for Apache Fineract portfolios."
 }
