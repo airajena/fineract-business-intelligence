@@ -107,7 +107,7 @@ select
     total_outstanding_derived                                   as total_outstanding,
     is_npa,
     case
-        when coalesce(min_age_days, 0) = 0      then 'Current'
+        when coalesce(min_age_days, 0) = 0      then 'Performing'
         when coalesce(min_age_days, 0) < 30     then 'Watch-list'
         when coalesce(min_age_days, 0) < 60     then 'PAR 30-59'
         when coalesce(min_age_days, 0) < 90     then 'PAR 60-89'

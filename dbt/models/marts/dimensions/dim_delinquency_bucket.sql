@@ -25,12 +25,12 @@ with source_buckets as (
 )
 
 select
-    0::bigint   as bucket_key,
-    'Current'   as bucket_name,
-    0           as min_age_days,
-    0           as max_age_days,
-    'Current'   as standard_par_band,
-    0           as sort_order
+    0::bigint    as bucket_key,
+    'Performing' as bucket_name,
+    0            as min_age_days,
+    0            as max_age_days,
+    'Performing' as standard_par_band,
+    0            as sort_order
 union all
 select
     bucket_key,
