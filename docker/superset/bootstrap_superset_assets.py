@@ -47,6 +47,7 @@ DELINQUENCY_COLUMNS: list[dict] = [
     {"name": "currency_code",             "type": "TEXT"},
     {"name": "bucket_key",                "type": "BIGINT"},
     {"name": "bucket_name",               "type": "TEXT"},
+    {"name": "standard_par_band",         "type": "TEXT"},
     {"name": "bucket_loan_count",         "type": "BIGINT"},
     {"name": "bucket_outstanding_amount", "type": "NUMERIC"},
     {"name": "total_loan_count",          "type": "BIGINT"},
@@ -155,6 +156,7 @@ def adhoc_metric(label: str, expression: str) -> dict:
         "label": label,
         "hasCustomLabel": True,
     }
+
 
 
 def sql_filter(sql_expression: str) -> dict:
@@ -412,32 +414,32 @@ def create_delinquency_assets(owner, database: Database) -> None:
 
     charts = [
         ensure_chart("PAR 30 KPI", "big_number_total", lat_ds, {
-            "metric": adhoc_metric("PAR 30", "(SUM(par_30_amount)*100)/NULLIF(SUM(total_portfolio_amount),0)"),
-            "metrics": [adhoc_metric("PAR 30", "(SUM(par_30_amount)*100)/NULLIF(SUM(total_portfolio_amount),0)")],
+            "metric": adhoc_metric("PAR 30 %", "(SUM(par_30_amount)*100)/NULLIF(SUM(total_portfolio_amount),0)"),
+            "metrics": [adhoc_metric("PAR 30 %", "(SUM(par_30_amount)*100)/NULLIF(SUM(total_portfolio_amount),0)")],
             "adhoc_filters": [ap],
-            "number_format": ",.2f",
-            "subheader": "Portfolio at Risk > 30 days",
+            "number_format": ",.2f%",
+            "subheader": "% of portfolio overdue > 30 days",
         }, owner),
         ensure_chart("PAR 60 KPI", "big_number_total", lat_ds, {
-            "metric": adhoc_metric("PAR 60", "(SUM(par_60_amount)*100)/NULLIF(SUM(total_portfolio_amount),0)"),
-            "metrics": [adhoc_metric("PAR 60", "(SUM(par_60_amount)*100)/NULLIF(SUM(total_portfolio_amount),0)")],
+            "metric": adhoc_metric("PAR 60 %", "(SUM(par_60_amount)*100)/NULLIF(SUM(total_portfolio_amount),0)"),
+            "metrics": [adhoc_metric("PAR 60 %", "(SUM(par_60_amount)*100)/NULLIF(SUM(total_portfolio_amount),0)")],
             "adhoc_filters": [ap],
-            "number_format": ",.2f",
-            "subheader": "Portfolio at Risk > 60 days",
+            "number_format": ",.2f%",
+            "subheader": "% of portfolio overdue > 60 days",
         }, owner),
         ensure_chart("PAR 90 KPI", "big_number_total", lat_ds, {
-            "metric": adhoc_metric("PAR 90", "(SUM(par_90_amount)*100)/NULLIF(SUM(total_portfolio_amount),0)"),
-            "metrics": [adhoc_metric("PAR 90", "(SUM(par_90_amount)*100)/NULLIF(SUM(total_portfolio_amount),0)")],
+            "metric": adhoc_metric("PAR 90 %", "(SUM(par_90_amount)*100)/NULLIF(SUM(total_portfolio_amount),0)"),
+            "metrics": [adhoc_metric("PAR 90 %", "(SUM(par_90_amount)*100)/NULLIF(SUM(total_portfolio_amount),0)")],
             "adhoc_filters": [ap],
-            "number_format": ",.2f",
-            "subheader": "Portfolio at Risk > 90 days",
+            "number_format": ",.2f%",
+            "subheader": "% of portfolio overdue > 90 days",
         }, owner),
         ensure_chart("NPA Exposure KPI", "big_number_total", lat_ds, {
-            "metric": adhoc_metric("NPA", "SUM(npa_amount)"),
-            "metrics": [adhoc_metric("NPA", "SUM(npa_amount)")],
+            "metric": adhoc_metric("NPA Amount ($)", "SUM(npa_amount)"),
+            "metrics": [adhoc_metric("NPA Amount ($)", "SUM(npa_amount)")],
             "adhoc_filters": [ap],
             "number_format": "$,.0f",
-            "subheader": "Non-Performing Asset Exposure",
+            "subheader": "Outstanding principal in non-performing loans",
         }, owner),
         ensure_chart("PAR Trend Line", "line", all_ds, {
             "granularity_sqla": "snapshot_date",
@@ -450,6 +452,10 @@ def create_delinquency_assets(owner, database: Database) -> None:
             "adhoc_filters": [ap],
             "row_limit": 5000,
             "y_axis_format": ".1%",
+            "x_axis_format": "%b %Y",
+            "zoomable": False,
+            "show_brush": "no",
+            "bottom_margin": 60,
         }, owner),
         ensure_chart("At-Risk Outstanding Trend", "area", all_ds, {
             "granularity_sqla": "snapshot_date",
@@ -463,38 +469,57 @@ def create_delinquency_assets(owner, database: Database) -> None:
             "row_limit": 5000,
             "y_axis_format": "$,.0f",
             "stacked_style": "stack",
+            "x_axis_format": "%b %Y",
+            "zoomable": False,
+            "bottom_margin": 60,
         }, owner),
-        ensure_chart("Delinquency Bucket Distribution", "pie", lat_ds, {
-            "groupby": ["bucket_name"],
-            "metric": adhoc_metric("Outstanding", "SUM(bucket_outstanding_amount)"),
-            "metrics": [adhoc_metric("Outstanding", "SUM(bucket_outstanding_amount)")],
+        ensure_chart("Outstanding Principal by Delinquency Band", "dist_bar", lat_ds, {
+            "groupby": ["standard_par_band"],
+            "metrics": [adhoc_metric("Outstanding Principal", "SUM(bucket_outstanding_amount)")],
             "adhoc_filters": [np],
-            "number_format": "$,.0f",
+            "y_axis_format": "$,.0f",
+            "bar_stacked": False,
+            "show_bar_value": True,
+            "rich_tooltip": True,
+            "order_bars": True,
+            "bottom_margin": 80,
+            "left_margin": 80,
         }, owner),
-        ensure_chart("At-Risk vs Current Loans", "pie", lat_ds, {
-            "groupby": ["bucket_name"],
-            "metric": adhoc_metric("Loan Count", "SUM(bucket_loan_count)"),
+        ensure_chart("Loan Count by Delinquency Band", "dist_bar", lat_ds, {
+            "groupby": ["standard_par_band"],
             "metrics": [adhoc_metric("Loan Count", "SUM(bucket_loan_count)")],
             "adhoc_filters": [np],
-            "number_format": ",d",
+            "y_axis_format": ",d",
+            "bar_stacked": False,
+            "show_bar_value": True,
+            "rich_tooltip": True,
+            "order_bars": True,
+            "bottom_margin": 80,
+            "left_margin": 80,
         }, owner),
         ensure_chart("PAR by Branch", "dist_bar", lat_ds, {
             "groupby": ["office_name"],
             "metrics": [
+                adhoc_metric("Watch-list", "SUM(watch_list_amount)/NULLIF(SUM(total_portfolio_amount),0)"),
                 adhoc_metric("PAR 30", "SUM(par_30_amount)/NULLIF(SUM(total_portfolio_amount),0)"),
+                adhoc_metric("PAR 60", "SUM(par_60_amount)/NULLIF(SUM(total_portfolio_amount),0)"),
                 adhoc_metric("PAR 90", "SUM(par_90_amount)/NULLIF(SUM(total_portfolio_amount),0)"),
             ],
             "adhoc_filters": [ap],
             "y_axis_format": ".1%",
             "bottom_margin": 100,
             "left_margin": 80,
+            "color_scheme": "googleCategory10c",
         }, owner),
         ensure_chart("PAR by Product", "dist_bar", lat_ds, {
             "groupby": ["product_name"],
             "metrics": [
+                adhoc_metric("Watch-list", "SUM(watch_list_amount)/NULLIF(SUM(total_portfolio_amount),0)"),
                 adhoc_metric("PAR 30", "SUM(par_30_amount)/NULLIF(SUM(total_portfolio_amount),0)"),
+                adhoc_metric("PAR 60", "SUM(par_60_amount)/NULLIF(SUM(total_portfolio_amount),0)"),
                 adhoc_metric("PAR 90", "SUM(par_90_amount)/NULLIF(SUM(total_portfolio_amount),0)"),
             ],
+            "color_scheme": "googleCategory10c",
             "adhoc_filters": [ap],
             "y_axis_format": ".1%",
             "bottom_margin": 150,
@@ -503,12 +528,12 @@ def create_delinquency_assets(owner, database: Database) -> None:
         ensure_chart("PAR Summary Table", "table", lat_ds, {
             "groupby": ["office_name", "product_name"],
             "metrics": [
-                adhoc_metric("Portfolio",   "SUM(total_portfolio_amount)"),
-                adhoc_metric("PAR 30",      "SUM(par_30_amount)/NULLIF(SUM(total_portfolio_amount),0)"),
-                adhoc_metric("PAR 60",      "SUM(par_60_amount)/NULLIF(SUM(total_portfolio_amount),0)"),
-                adhoc_metric("PAR 90",      "SUM(par_90_amount)/NULLIF(SUM(total_portfolio_amount),0)"),
-                adhoc_metric("NPA Loans",   "SUM(npa_loan_count)"),
-                adhoc_metric("NPA Ratio",   "SUM(npa_amount)/NULLIF(SUM(total_portfolio_amount),0)"),
+                adhoc_metric("Outstanding Principal ($)", "SUM(total_portfolio_amount)"),
+                adhoc_metric("PAR 30 %",    "(SUM(par_30_amount)*100)/NULLIF(SUM(total_portfolio_amount),0)"),
+                adhoc_metric("PAR 60 %",    "(SUM(par_60_amount)*100)/NULLIF(SUM(total_portfolio_amount),0)"),
+                adhoc_metric("PAR 90 %",    "(SUM(par_90_amount)*100)/NULLIF(SUM(total_portfolio_amount),0)"),
+                adhoc_metric("NPA Loans (#)", "SUM(npa_loan_count)"),
+                adhoc_metric("NPA Ratio %",  "(SUM(npa_amount)*100)/NULLIF(SUM(total_portfolio_amount),0)"),
             ],
             "adhoc_filters": [ap],
             "table_timestamp_format": "%Y-%m-%d",
@@ -520,7 +545,7 @@ def create_delinquency_assets(owner, database: Database) -> None:
          "default_width": 3, "default_height": 20},
         {"id": "ROW-TREND",  "charts": ["PAR Trend Line", "At-Risk Outstanding Trend"],
          "default_width": 6, "default_height": 42},
-        {"id": "ROW-DIST",   "charts": ["Delinquency Bucket Distribution", "At-Risk vs Current Loans"],
+        {"id": "ROW-DIST",   "charts": ["Outstanding Principal by Delinquency Band", "Loan Count by Delinquency Band"],
          "default_width": 6, "default_height": 36},
         {"id": "ROW-BRANCH", "charts": ["PAR by Branch", "PAR by Product"],
          "default_width": 6, "default_height": 42},
@@ -545,35 +570,35 @@ def create_portfolio_assets(owner, database: Database) -> None:
     npa_ratio_expr = "(SUM(npa_outstanding_amount)*100)/NULLIF(SUM(gross_loan_portfolio),0)"
 
     charts = [
-        ensure_chart("Gross Loan Portfolio KPI", "big_number_total", lat_ds, {
+        ensure_chart("Gross Loan Portfolio", "big_number_total", lat_ds, {
             "metric": adhoc_metric("GLP", "SUM(gross_loan_portfolio)"),
             "metrics": [adhoc_metric("GLP", "SUM(gross_loan_portfolio)")],
             "number_format": "$,.0f",
             "subheader": "Active principal outstanding",
         }, owner),
-        ensure_chart("Active Loans KPI", "big_number_total", lat_ds, {
+        ensure_chart("Active Loans", "big_number_total", lat_ds, {
             "metric": adhoc_metric("Loans", "SUM(active_loan_count)"),
             "metrics": [adhoc_metric("Loans", "SUM(active_loan_count)")],
             "number_format": ",d",
             "subheader": "Active loan accounts",
         }, owner),
-        ensure_chart("Active Borrowers KPI", "big_number_total", lat_ds, {
+        ensure_chart("Active Borrowers", "big_number_total", lat_ds, {
             "metric": adhoc_metric("Borrowers", "SUM(active_borrower_count)"),
             "metrics": [adhoc_metric("Borrowers", "SUM(active_borrower_count)")],
             "number_format": ",d",
             "subheader": "Unique active borrowers",
         }, owner),
-        ensure_chart("NPA Ratio KPI", "big_number_total", lat_ds, {
-            "metric": adhoc_metric("NPA Ratio", npa_ratio_expr),
-            "metrics": [adhoc_metric("NPA Ratio", npa_ratio_expr)],
-            "number_format": ",.2f",
-            "subheader": "Non-performing assets as % of GLP",
+        ensure_chart("NPA Ratio", "big_number_total", lat_ds, {
+            "metric": adhoc_metric("NPA Ratio %", npa_ratio_expr),
+            "metrics": [adhoc_metric("NPA Ratio %", npa_ratio_expr)],
+            "number_format": ",.2f%",
+            "subheader": "Non-performing loans as % of total outstanding principal",
         }, owner),
-        ensure_chart("Average Loan Size KPI", "big_number_total", lat_ds, {
-            "metric": adhoc_metric("Avg Size", "SUM(gross_loan_portfolio)/NULLIF(SUM(active_loan_count),0)"),
-            "metrics": [adhoc_metric("Avg Size", "SUM(gross_loan_portfolio)/NULLIF(SUM(active_loan_count),0)")],
+        ensure_chart("Average Loan Size", "big_number_total", lat_ds, {
+            "metric": adhoc_metric("Avg Loan Size ($)", "SUM(gross_loan_portfolio)/NULLIF(SUM(active_loan_count),0)"),
+            "metrics": [adhoc_metric("Avg Loan Size ($)", "SUM(gross_loan_portfolio)/NULLIF(SUM(active_loan_count),0)")],
             "number_format": "$,.0f",
-            "subheader": "Average outstanding per loan",
+            "subheader": "Average outstanding principal per active loan",
         }, owner),
         ensure_chart("Portfolio Composition Trend", "area", all_ds, {
             "granularity_sqla": "snapshot_date",
@@ -585,17 +610,25 @@ def create_portfolio_assets(owner, database: Database) -> None:
             ],
             "row_limit": 5000,
             "y_axis_format": "$,.0f",
+            "x_axis_format": "%b %Y",
             "stacked_style": "stack",
+            "zoomable": False,
+            "bottom_margin": 60,
         }, owner),
-        ensure_chart("Gross Loan Portfolio Trend", "line", all_ds, {
+        ensure_chart("Portfolio Quality Trend", "line", all_ds, {
             "granularity_sqla": "snapshot_date",
             "time_grain_sqla": "P1D",
             "metrics": [
-                adhoc_metric("GLP",               "SUM(gross_loan_portfolio)"),
-                adhoc_metric("Total Outstanding", "SUM(total_outstanding_amount)"),
+                adhoc_metric("GLP",        "SUM(gross_loan_portfolio)"),
+                adhoc_metric("Performing", "SUM(performing_outstanding_amount)"),
+                adhoc_metric("At Risk",    "SUM(par_outstanding_amount)"),
             ],
             "row_limit": 5000,
             "y_axis_format": "$,.0f",
+            "x_axis_format": "%b %Y",
+            "zoomable": False,
+            "show_brush": "no",
+            "bottom_margin": 60,
         }, owner),
         ensure_chart("Active Borrowers & Loans Trend", "line", all_ds, {
             "granularity_sqla": "snapshot_date",
@@ -606,17 +639,10 @@ def create_portfolio_assets(owner, database: Database) -> None:
             ],
             "row_limit": 5000,
             "y_axis_format": ",d",
-        }, owner),
-        ensure_chart("Principal vs Interest Outstanding", "area", all_ds, {
-            "granularity_sqla": "snapshot_date",
-            "time_grain_sqla": "P1D",
-            "metrics": [
-                adhoc_metric("Principal", "SUM(gross_loan_portfolio)"),
-                adhoc_metric("Interest",  "SUM(interest_outstanding_amount)"),
-            ],
-            "row_limit": 5000,
-            "y_axis_format": "$,.0f",
-            "stacked_style": "stack",
+            "x_axis_format": "%b %Y",
+            "zoomable": False,
+            "show_brush": "no",
+            "bottom_margin": 60,
         }, owner),
         ensure_chart("Disbursement vs Collection Trend", "line", all_ds, {
             "granularity_sqla": "snapshot_date",
@@ -627,6 +653,10 @@ def create_portfolio_assets(owner, database: Database) -> None:
             ],
             "row_limit": 5000,
             "y_axis_format": "$,.0f",
+            "x_axis_format": "%b %Y",
+            "zoomable": False,
+            "show_brush": "no",
+            "bottom_margin": 60,
         }, owner),
         ensure_chart("Net Portfolio Flow", "bar", all_ds, {
             "granularity_sqla": "snapshot_date",
@@ -636,6 +666,7 @@ def create_portfolio_assets(owner, database: Database) -> None:
             ],
             "row_limit": 5000,
             "y_axis_format": "$,.0f",
+            "x_axis_format": "%b %Y",
             "show_brush": False,
             "bottom_margin": 60,
         }, owner),
@@ -643,6 +674,7 @@ def create_portfolio_assets(owner, database: Database) -> None:
             "groupby": ["office_name"],
             "metrics": [
                 adhoc_metric("GLP", "SUM(gross_loan_portfolio)"),
+                adhoc_metric("At Risk", "SUM(par_outstanding_amount)"),
                 adhoc_metric("NPA", "SUM(npa_outstanding_amount)"),
             ],
             "y_axis_format": "$,.0f",
@@ -653,6 +685,7 @@ def create_portfolio_assets(owner, database: Database) -> None:
             "groupby": ["product_name"],
             "metrics": [
                 adhoc_metric("GLP", "SUM(gross_loan_portfolio)"),
+                adhoc_metric("At Risk", "SUM(par_outstanding_amount)"),
                 adhoc_metric("NPA", "SUM(npa_outstanding_amount)"),
             ],
             "y_axis_format": "$,.0f",
@@ -668,31 +701,31 @@ def create_portfolio_assets(owner, database: Database) -> None:
         ensure_chart("Portfolio Health Summary Table", "table", lat_ds, {
             "groupby": ["office_name", "product_name"],
             "metrics": [
-                adhoc_metric("GLP",          "SUM(gross_loan_portfolio)"),
-                adhoc_metric("Active Loans", "SUM(active_loan_count)"),
-                adhoc_metric("Borrowers",    "SUM(active_borrower_count)"),
-                adhoc_metric("Avg Size",     "SUM(gross_loan_portfolio)/NULLIF(SUM(active_loan_count),0)"),
-                adhoc_metric("NPA Loans",    "SUM(npa_loan_count)"),
-                adhoc_metric("NPA Ratio",    "SUM(npa_outstanding_amount)/NULLIF(SUM(gross_loan_portfolio),0)"),
+                adhoc_metric("Outstanding Principal ($)", "SUM(gross_loan_portfolio)"),
+                adhoc_metric("Active Loans (#)",          "SUM(active_loan_count)"),
+                adhoc_metric("Active Borrowers (#)",      "SUM(active_borrower_count)"),
+                adhoc_metric("Avg Loan Size ($)",         "SUM(gross_loan_portfolio)/NULLIF(SUM(active_loan_count),0)"),
+                adhoc_metric("NPA Loans (#)",             "SUM(npa_loan_count)"),
+                adhoc_metric("NPA Ratio %",               "(SUM(npa_outstanding_amount)*100)/NULLIF(SUM(gross_loan_portfolio),0)"),
             ],
             "table_timestamp_format": "%Y-%m-%d",
         }, owner),
     ]
 
     ensure_dashboard("portfolio_health_dashboard.json", owner, charts, [
-        {"id": "ROW-PH-KPIS",      "charts": ["Gross Loan Portfolio KPI", "Active Loans KPI", "Active Borrowers KPI", "NPA Ratio KPI", "Average Loan Size KPI"],
+        {"id": "ROW-PH-KPIS",      "charts": ["Gross Loan Portfolio", "Active Loans", "Active Borrowers", "NPA Ratio", "Average Loan Size"],
          "default_width": 2, "default_height": 20,
-         "chart_sizes": {"Gross Loan Portfolio KPI": {"width": 4, "height": 20}}},
-        {"id": "ROW-PH-COMPOSITION", "charts": ["Portfolio Composition Trend", "Gross Loan Portfolio Trend"],
-         "default_width": 6, "default_height": 42},
-        {"id": "ROW-PH-GROWTH",    "charts": ["Active Borrowers & Loans Trend", "Principal vs Interest Outstanding"],
+         "chart_sizes": {"Gross Loan Portfolio": {"width": 4, "height": 20}}},
+        {"id": "ROW-PH-COMPOSITION", "charts": ["Portfolio Composition Trend", "Portfolio Quality Trend"],
          "default_width": 6, "default_height": 42},
         {"id": "ROW-PH-FLOW",      "charts": ["Disbursement vs Collection Trend", "Net Portfolio Flow"],
          "default_width": 6, "default_height": 42},
+        {"id": "ROW-PH-GROWTH",    "charts": ["Active Borrowers & Loans Trend", "Portfolio Concentration by Branch"],
+         "default_width": 6, "default_height": 42},
         {"id": "ROW-PH-BREAKDOWN", "charts": ["Portfolio by Branch", "Portfolio by Product"],
          "default_width": 6, "default_height": 42},
-        {"id": "ROW-PH-CONCENTRATION", "charts": ["Portfolio Concentration by Branch", "Portfolio Health Summary Table"],
-         "default_width": 6, "default_height": 40},
+        {"id": "ROW-PH-TABLE",     "charts": ["Portfolio Health Summary Table"],
+         "default_width": 12, "default_height": 40},
     ])
     print("[assets] Portfolio Health dashboard created.")
 
@@ -745,6 +778,9 @@ def create_repayment_assets(owner, database: Database) -> None:
             ],
             "row_limit": 5000,
             "y_axis_format": "$,.0f",
+            "zoomable": False,
+            "show_brush": "no",
+            "bottom_margin": 60,
         }, owner),
         ensure_chart("Collection Efficiency Trend", "line", all_ds, {
             "granularity_sqla": "reporting_date",
@@ -752,6 +788,9 @@ def create_repayment_assets(owner, database: Database) -> None:
             "metrics": [adhoc_metric("Efficiency", eff_expr)],
             "row_limit": 5000,
             "y_axis_format": ".1%",
+            "zoomable": False,
+            "show_brush": "no",
+            "bottom_margin": 60,
         }, owner),
         ensure_chart("Repayment Component Breakdown", "area", all_ds, {
             "granularity_sqla": "reporting_date",
@@ -765,6 +804,8 @@ def create_repayment_assets(owner, database: Database) -> None:
             "row_limit": 5000,
             "y_axis_format": "$,.0f",
             "stacked_style": "stack",
+            "zoomable": False,
+            "bottom_margin": 60,
         }, owner),
         ensure_chart("Collection Mix", "pie", all_ds, {
             "groupby": ["office_name"],

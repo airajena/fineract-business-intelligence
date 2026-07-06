@@ -13,6 +13,13 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 
+{{
+    config(
+        materialized='incremental',
+        unique_key='delinquency_event_key'
+    )
+}}
+
 with ordered_events as (
     select
         tenant_id,
@@ -51,19 +58,20 @@ select
     coalesce(min_age_days, 0)                   as min_age_days,
     coalesce(max_age_days, 0)                   as max_age_days,
     case
-        when coalesce(min_age_days, 0) = 0      then 'Current'
+        when coalesce(min_age_days, 0) = 0      then 'Performing'
         when coalesce(min_age_days, 0) < 30     then 'Watch-list'
         when coalesce(min_age_days, 0) < 60     then 'PAR 30-59'
         when coalesce(min_age_days, 0) < 90     then 'PAR 60-89'
         else                                         'PAR 90+'
     end                                         as standard_par_band,
     case
-        when coalesce(previous_min_age_days, 0) = 0     then 'Current'
+        when coalesce(previous_min_age_days, 0) = 0     then 'Performing'
         when coalesce(previous_min_age_days, 0) < 30    then 'Watch-list'
         when coalesce(previous_min_age_days, 0) < 60    then 'PAR 30-59'
         when coalesce(previous_min_age_days, 0) < 90    then 'PAR 60-89'
         else                                                  'PAR 90+'
     end                                         as previous_standard_par_band,
+
     event_start_date,
     event_end_date,
     coalesce(
