@@ -77,7 +77,10 @@ jobs:
           persist-credentials: false
 
       - name: Copy env config
-        run: cp .env.example .env
+        run: |
+          cp .env.example .env
+          echo "SOURCE_DB_HOST=fineract-db" >> .env
+          echo "SOURCE_DB_HOST_PORT=5432" >> .env
 
       - name: Remove stale volumes from any previous run
         run: docker compose down -v --remove-orphans 2>/dev/null || true
