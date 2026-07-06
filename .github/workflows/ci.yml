@@ -91,16 +91,28 @@ jobs:
       - name: Wait for fineract-db to be ready
         run: |
           for i in $(seq 1 30); do
-            docker compose exec -T fineract-db pg_isready -U root -d postgres && break
-            [ "$i" -eq 30 ] && { echo "ERROR: fineract-db never became ready"; exit 1; }
+            STATUS=$(docker inspect --format='{{.State.Status}}' fineract-bi-fineract-db 2>/dev/null || echo "missing")
+            if [ "$STATUS" = "exited" ] || [ "$STATUS" = "dead" ]; then
+              echo "ERROR: fineract-db container exited unexpectedly"
+              docker logs fineract-bi-fineract-db
+              exit 1
+            fi
+            docker exec fineract-bi-fineract-db pg_isready -U root -d postgres && break
+            [ "$i" -eq 30 ] && { echo "ERROR: fineract-db never became ready"; docker logs fineract-bi-fineract-db; exit 1; }
             sleep 3
           done
 
       - name: Wait for warehouse to be ready
         run: |
           for i in $(seq 1 30); do
-            docker compose exec -T warehouse pg_isready -U analytics_admin -d analytics && break
-            [ "$i" -eq 30 ] && { echo "ERROR: warehouse never became ready"; exit 1; }
+            STATUS=$(docker inspect --format='{{.State.Status}}' fineract-bi-warehouse 2>/dev/null || echo "missing")
+            if [ "$STATUS" = "exited" ] || [ "$STATUS" = "dead" ]; then
+              echo "ERROR: warehouse container exited unexpectedly"
+              docker logs fineract-bi-warehouse
+              exit 1
+            fi
+            docker exec fineract-bi-warehouse pg_isready -U analytics_admin -d analytics && break
+            [ "$i" -eq 30 ] && { echo "ERROR: warehouse never became ready"; docker logs fineract-bi-warehouse; exit 1; }
             sleep 3
           done
 
