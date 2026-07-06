@@ -79,6 +79,9 @@ jobs:
       - name: Copy env config
         run: cp .env.example .env
 
+      - name: Remove stale volumes from any previous run
+        run: docker compose down -v --remove-orphans 2>/dev/null || true
+
       - name: Create external Docker network required by extractor service
         run: docker network create fineract_default || true
 
