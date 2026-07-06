@@ -79,6 +79,9 @@ jobs:
       - name: Copy env config
         run: cp .env.example .env
 
+      - name: Create external Docker network required by extractor service
+        run: docker network create fineract_default || true
+
       - name: Build Docker images
         run: docker compose build
 
