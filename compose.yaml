@@ -32,7 +32,7 @@ services:
     ports:
       - "5433:5432"
     volumes:
-      - fineract_db_data:/var/lib/postgresql/data
+      - fineract_db_data:/var/lib/postgresql
       - ./docker/fineract-postgresql/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${SOURCE_BOOTSTRAP_USER:?SOURCE_BOOTSTRAP_USER must be set} -d postgres"]
