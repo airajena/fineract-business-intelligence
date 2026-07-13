@@ -84,10 +84,11 @@ bucket_distribution as (
         pb.currency_code,
         pb.bucket_key,
         pb.bucket_name,
+        pb.standard_par_band,
         count(distinct pb.loan_id)              as bucket_loan_count,
         sum(pb.principal_outstanding)           as bucket_outstanding_amount
     from portfolio_base pb
-    group by 1, 2, 3, 4, 5, 6, 7
+    group by 1, 2, 3, 4, 5, 6, 7, 8
 ),
 enriched_buckets as (
     select
@@ -100,6 +101,7 @@ enriched_buckets as (
         bd.currency_code,
         bd.bucket_key,
         bd.bucket_name,
+        bd.standard_par_band,
         bd.bucket_loan_count,
         bd.bucket_outstanding_amount,
 
@@ -152,6 +154,7 @@ portfolio_rollup as (
         pt.currency_code,
         -1::bigint                              as bucket_key,
         'All Portfolio'                         as bucket_name,
+        'All Portfolio'                         as standard_par_band,
         pt.total_loan_count                     as bucket_loan_count,
         pt.total_portfolio_amount               as bucket_outstanding_amount,
 

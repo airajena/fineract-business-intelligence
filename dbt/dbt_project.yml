@@ -33,7 +33,7 @@ clean-targets:
 
 vars:
   tenant_id: "{{ env_var('TENANT_ID', 'default') }}"
-  historical_start_date: "2010-01-01"
+  historical_start_date: "2025-01-01"
   future_end_date: "2035-12-31"
   snapshot_incremental_lookback_days: 120
 
