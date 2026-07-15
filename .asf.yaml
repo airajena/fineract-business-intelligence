@@ -17,8 +17,19 @@
 
 notifications:
   commits: commits@fineract.apache.org
+  issues: issues@fineract.apache.org
   pullrequests: issues@fineract.apache.org
+  discussions: issues@fineract.apache.org
 github:
+  features:
+    issues: true
+    wiki: true
+    projects: true
+    discussions: false
+  copilot_code_review:
+    enabled: true
+    review_drafts: true
+    review_on_push: true
   enabled_merge_buttons:
     merge: true
     squash: false
