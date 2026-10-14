@@ -137,7 +137,7 @@ jobs:
         run: docker compose build
 
       - name: Start data services
-        run: docker compose up -d fineract-db warehouse extractor dbt
+        run: docker compose up -d fineract-db warehouse dbt
 
       - name: Wait for fineract-db to be ready
         run: |
@@ -187,7 +187,7 @@ jobs:
         run: bash scripts/bootstrap_source.sh
 
       - name: Run ELT pipeline (backfill)
-        run: docker compose exec -T extractor python -m extractor.cli backfill
+        run: docker compose run --rm -T extractor python -m extractor.cli backfill
 
       - name: Install dbt packages (dbt-utils)
         run: docker compose exec -T dbt dbt deps
