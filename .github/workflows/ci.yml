@@ -192,6 +192,9 @@ jobs:
       - name: Install dbt packages (dbt-utils)
         run: docker compose exec -T dbt dbt deps
 
+      - name: Load dbt seeds - certified metric catalog
+        run: docker compose exec -T dbt dbt seed
+
       - name: Run dbt models
         run: docker compose exec -T dbt dbt run
 
