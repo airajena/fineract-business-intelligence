@@ -169,7 +169,7 @@ def second_bank():
               "VALUES (:s, 'other-tenant', 'it-region-west', 'ACTIVE') ON CONFLICT (source_id) DO NOTHING",
               s=OTHER_SOURCE)
     for table, _ in MART_FOR_DATASET.values():
-        admin.run(f"CREATE TEMP TABLE clone AS SELECT * FROM {table} WHERE source_id = 'default' AND office_id = 101")
+        admin.run(f"CREATE TEMP TABLE clone AS SELECT * FROM {table} WHERE source_id = 'default'")
         admin.run("UPDATE clone SET source_id = :s, tenant_id = 'other-tenant'", s=OTHER_SOURCE)
         admin.run(f"INSERT INTO {table} SELECT * FROM clone")
         admin.run("DROP TABLE clone")
