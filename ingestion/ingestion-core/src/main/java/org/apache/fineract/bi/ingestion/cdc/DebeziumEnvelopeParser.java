@@ -101,6 +101,7 @@ public final class DebeziumEnvelopeParser {
         List<ColumnSpec> columns = table.columns();
         String[] values = new String[columns.size()];
         List<String> unavailable = new ArrayList<>(0);
+        List<String> absent = new ArrayList<>(0);
         for (int i = 0; i < columns.size(); i++) {
             ColumnSpec col = columns.get(i);
             if (col.synthetic()) {
@@ -113,16 +114,22 @@ public final class DebeziumEnvelopeParser {
                     break;
                 }
             }
+            if (node == null && kind == ChangeEvent.Op.UPSERT) {
+                unavailable.add(col.name());
+                absent.add(col.name());
+                continue;
+            }
             if (node != null && node.isTextual() && UNAVAILABLE_PLACEHOLDER.equals(node.asText())) {
                 unavailable.add(col.name());
                 continue;
             }
-            values[i] = ValueConverter.toPgText(node, col.type());
+            values[i] = ValueConverter.toPgText(node, col.type(), col.cdcUnit());
         }
         if (values[table.primaryKeyIndex()] == null) {
             throw new PoisonEventException("MISSING_PRIMARY_KEY", "Row image has no " + table.primaryKey());
         }
-        return Optional.of(new ChangeEvent(sourceId, table.tableName(), kind, values, unavailable, lsn, tsMicros));
+        return Optional.of(new ChangeEvent(
+                sourceId, table.tableName(), kind, values, unavailable, lsn, tsMicros, absent));
     }
 
     private static String text(JsonNode node, String field) {

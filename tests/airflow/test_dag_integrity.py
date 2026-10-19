@@ -9,15 +9,20 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
-pytest.importorskip("airflow")
+if os.getenv("FBI_REQUIRE_AIRFLOW", "").lower() != "true":
+    pytest.importorskip("airflow")
 
 from airflow.models.dagbag import DagBag  # noqa: E402
 

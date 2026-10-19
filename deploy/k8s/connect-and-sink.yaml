@@ -9,6 +9,9 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 apiVersion: kafka.strimzi.io/v1beta2
 kind: KafkaConnect
@@ -37,13 +40,20 @@ spec:
     offset.storage.replication.factor: 3
     status.storage.replication.factor: 3
     topic.creation.enable: false
-    connector.client.config.override.policy: All
+    connector.client.config.override.policy: None
     config.providers: env,file
     config.providers.env.class: org.apache.kafka.common.config.provider.EnvVarConfigProvider
+    config.providers.env.param.allowlist.pattern: "FBI_SRC_[A-Za-z0-9_]+"
     config.providers.file.class: org.apache.kafka.common.config.provider.FileConfigProvider
+    config.providers.file.param.allowed.paths: /opt/kafka/external-configuration/secrets
+    producer.compression.type: zstd
+    producer.linger.ms: 50
+    producer.batch.size: 262144
+    producer.acks: all
+    producer.enable.idempotence: true
   externalConfiguration:
     env:
-      - name: FINERACT_CDC_PASSWORD
+      - name: FBI_SRC_DEMO_PASSWORD
         valueFrom: {secretKeyRef: {name: fineract-cdc-credentials, key: password}}
   resources:
     requests: {cpu: "2", memory: 4Gi}
@@ -83,9 +93,9 @@ spec:
             - {name: SINK_THREADS, value: "4"}
             - {name: SINK_MAX_BATCH_EVENTS, value: "10000"}
             - {name: SINK_DB_URL, value: "jdbc:postgresql://warehouse-primary:5432/analytics?sslmode=verify-full"}
-            - {name: SINK_DB_USER, value: analytics_loader}
+            - {name: SINK_DB_USER, value: analytics_engine}
             - name: SINK_DB_PASSWORD
-              valueFrom: {secretKeyRef: {name: warehouse-loader, key: password}}
+              valueFrom: {secretKeyRef: {name: warehouse-engine, key: password}}
             - {name: SINK_KAFKA_SECURITY_PROTOCOL, value: SASL_SSL}
             - {name: SINK_KAFKA_SASL_MECHANISM, value: SCRAM-SHA-512}
             - name: SINK_KAFKA_SASL_JAAS_CONFIG
@@ -122,3 +132,27 @@ spec:
         consumerGroup: fbi-warehouse-sink
         lagThreshold: "50000"
         allowIdleConsumers: "false"
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fbi-connect-rest-restricted
+spec:
+  podSelector:
+    matchLabels:
+      strimzi.io/kind: KafkaConnect
+      strimzi.io/cluster: fbi-connect-west
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: fbi-control-plane}
+      ports:
+        - {protocol: TCP, port: 8083}
+    - from:
+        - podSelector:
+            matchLabels:
+              strimzi.io/kind: KafkaConnect
+              strimzi.io/cluster: fbi-connect-west
+      ports:
+        - {protocol: TCP, port: 8083}

@@ -201,10 +201,16 @@ function src { docker exec fineract-bi-fineract-db psql -U root -d fineract_defa
 docker compose up -d warehouse fineract-db dbt superset
 ```
 
+**Secrets and keys in `.env`**
+
+Copy `.env.example` to `.env`. Besides the database passwords it now needs `AIRFLOW_FERNET_KEY`, `AIRFLOW_JWT_SECRET`, `AIRFLOW_ADMIN_PASSWORD`, `FBI_PII_HASH_KEY`, `FBI_CONNECT_USER`, `FBI_CONNECT_PASSWORD`, `WAREHOUSE_ENGINE_USER` and `WAREHOUSE_ENGINE_PASSWORD`. Compose refuses to start without them, so there are no built-in default secrets. The sample file carries development-only values; replace them outside a laptop. `FBI_DEFAULT_SSLMODE=disable` in the sample is also development-only: the code default for source connections is `verify-full`. The Kafka Connect REST port (8083), Kafka's external listener (29092) and Airflow (8080) are published on `127.0.0.1` only. The Kafka Connect REST API also requires HTTP Basic authentication with `FBI_CONNECT_USER` and `FBI_CONNECT_PASSWORD`, and the control plane sends the same credentials. In PowerShell, build the header once per window: `$ch = @{ Authorization = "Basic " + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("fbi_connect:<connect password>")) }`, then add `-Headers $ch` to every `Invoke-RestMethod` call against port 8083. To run the control-plane commands from the host, also set `$env:FBI_CONNECT_USER="fbi_connect"; $env:FBI_CONNECT_PASSWORD="<connect password>"`.
+
+**Upgrading an existing environment.** Role creation runs only when the warehouse volume is first created. On an existing warehouse, re-apply `warehouse/schema/platform.sql` as the admin role, create the engine role with the grants in `docker/postgres-warehouse/initdb/002_create_warehouse_roles.sh`, run `UPDATE meta.source_registry SET secret_ref = 'env:FBI_SRC_DEMO_PASSWORD' WHERE secret_ref = 'env:FINERACT_CDC_PASSWORD'` (and rename the variable wherever you set it), recreate `connect` and `sink`, and run one `dbt build --full-refresh`.
+
 **Add the CDC stack**
 
 ```powershell
-$env:FINERACT_CDC_PASSWORD = "<dev password>"     # must be set before 'connect' starts
+$env:FBI_SRC_DEMO_PASSWORD = "<dev password>"     # must be set before 'connect' starts
 $env:KAFKA_HEAP = "384m"; $env:CONNECT_HEAP = "384m"
 docker compose up -d warehouse fineract-db
 docker compose --profile cdc up -d kafka kafka-init connect sink
@@ -236,7 +242,7 @@ docker compose --profile cdc --profile airflow --profile python --profile loadte
 
 ## 5. The Python engine
 
-The Python engine reads each source through read-only views and copies changed rows on a schedule. It reads in pages of `EXTRACT_PAGE_SIZE` rows using a keyset watermark `(cursor, primary key)`, so memory stays flat however big a table is, and it re-reads a 10-minute lookback window (`EXTRACT_LOOKBACK_SECONDS=600`) for commits that become visible late. A COB (end-of-day batch) gate stops it from copying half-processed books. Incremental mode cannot see deleted rows, so a separate `reconcile` run compares keys with bucketed checksums.
+The Python engine reads each source through read-only views and copies changed rows on a schedule. It reads in pages of `EXTRACT_PAGE_SIZE` rows using a keyset watermark `(cursor, primary key)`, so memory stays flat however big a table is, and it re-reads a 10-minute lookback window (`EXTRACT_LOOKBACK_SECONDS=600`) for commits that become visible late. A COB (end-of-day batch) gate stops it from copying half-processed books. Incremental mode cannot see deleted rows, so a separate `reconcile` run compares keys with bucketed checksums. The page query is `WHERE (cursor, pk) > (...) ORDER BY cursor, pk` on the raw column, so it can only avoid scanning the whole table when the source has an index on `(last_modified_on_utc, id)` for each large table (the compatibility views are plain projections, so the index is used through them). Ask the source DBA to create it before the first backfill of a big database. Rows whose cursor column is NULL are read in a separate first pass by primary key. Each (source, table, target) is processed under an advisory lock, so overlapping runs of the ingestion, delete-reconcile and feature-flag follow-up jobs queue instead of racing, and delete candidates are re-checked against the source immediately before they are soft-deleted.
 
 **Point the extractor at the demo source and the warehouse**
 
@@ -244,7 +250,7 @@ The Python engine reads each source through read-only views and copies changed r
 $env:WAREHOUSE_DB_HOST="localhost"; $env:WAREHOUSE_DB_PORT="5434"
 $env:WAREHOUSE_DB_USER="analytics_loader"; $env:WAREHOUSE_DB_PASSWORD="<dev password>"
 $env:SOURCE_DB_HOST="localhost"; $env:SOURCE_DB_PORT="5433"; $env:SOURCE_DB_NAME="fineract_default"
-$env:SOURCE_DB_USER="fineract_reader"; $env:SOURCE_DB_PASSWORD="<dev password>"
+$env:SOURCE_DB_USER="fineract_reader"; $env:FBI_SRC_DEFAULT_PASSWORD="<dev password>"
 $env:SOURCE_DB_SCHEMA="bi_connector_source"
 $env:COB_LOOKBACK_HOURS="99999"; $env:LOG_LEVEL="WARNING"
 ```
@@ -301,14 +307,14 @@ Every raw row carries these extra columns:
 | **Partitions** | Parallel lanes in a topic. Messages are keyed by row id so one row stays in order |
 | **Java sink** | Reads batches and writes them with their offsets in one transaction. Bad messages go to the dead-letter topic |
 
-Only the columns listed in the contract leave the source (`column.include.list`). Connector passwords are never stored: the registry holds a reference such as `env:FINERACT_CDC_PASSWORD`, and Connect resolves it from its own environment.
+Only the columns listed in the contract leave the source (`column.include.list`), and columns flagged `pii` in the contract (today `date_of_birth`) are left out unless you set `FBI_EXCLUDE_PII=false`. The Python engine applies the same switch, so both engines write the same raw rows. Connector passwords are never stored: the registry holds a reference such as `env:FBI_SRC_DEMO_PASSWORD`, and Connect resolves it from its own environment.
 
 ### 6.2 Look at what exists
 
 ```powershell
 docker compose --profile cdc exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
 docker compose --profile cdc exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic fineract.cdc.m_loan
-(Invoke-RestMethod "http://localhost:8083/connectors?expand=status").PSObject.Properties | ForEach-Object { "{0}: {1} tasks={2}" -f $_.Name, $_.Value.status.connector.state, (($_.Value.status.tasks | ForEach-Object { $_.state }) -join ",") }
+(Invoke-RestMethod -Headers $ch "http://localhost:8083/connectors?expand=status").PSObject.Properties | ForEach-Object { "{0}: {1} tasks={2}" -f $_.Name, $_.Value.status.connector.state, (($_.Value.status.tasks | ForEach-Object { $_.state }) -join ",") }
 ```
 
 You should see the 13 `fineract.cdc.<table>` topics plus the housekeeping topics. `describe` shows `PartitionCount: 6` and `ReplicationFactor: 1` on the laptop profile (production: 3 copies).
@@ -332,10 +338,12 @@ docker exec fineract-bi-fineract-db psql -U root -d fineract_src_004 -c "GRANT C
 
 ```powershell
 $env:WAREHOUSE_DB_HOST="localhost"; $env:WAREHOUSE_DB_PORT="5434"; $env:WAREHOUSE_DB_USER="analytics_loader"; $env:WAREHOUSE_DB_PASSWORD="<dev password>"; $env:LOG_LEVEL="WARNING"
-python -m controlplane.cli --actor you register-source --source-id cdc-src-004 --tenant-id t-004 --region west --host fineract-bi-fineract-db --db fineract_src_004 --user fbi_cdc --secret-ref env:FINERACT_CDC_PASSWORD --engine KAFKA
+python -m controlplane.cli --actor you register-source --source-id cdc-src-004 --tenant-id t-004 --region west --host fineract-bi-fineract-db --db fineract_src_004 --user fbi_cdc --secret-ref env:FBI_SRC_DEMO_PASSWORD --engine KAFKA
 ```
 
 This writes one registry row and 13 ownership rows ("KAFKA owns every table").
+
+`--secret-ref` must be an allowed reference. An `env:` name has to match the allowlist in `FBI_SECRET_ENV_ALLOWLIST` (by default only names starting with `FBI_SRC_`, such as `FBI_SRC_DEMO_PASSWORD`), and a `file:` path has to sit below `FBI_SECRET_DIR`. Anything else is rejected, because a source's `secret_ref` is resolved on the workers and sent to the source's `db_host`. Kafka Connect applies the same limits (`CONNECT_ENV_ALLOWLIST`, `CONNECT_FILE_ALLOWED_PATHS`). Source connections verify TLS by default; for the local demo database set `$env:FBI_DEFAULT_SSLMODE = "disable"` in the window where you run the control-plane commands.
 
 **Step 3. Create the connector.** Wait about 8 seconds first so the sink learns about the new source (it refreshes every 5 seconds); otherwise the first messages are dead-lettered as `UNKNOWN_SOURCE`.
 
@@ -352,7 +360,7 @@ $rep.actions | Format-Table kind, name
 
 ```powershell
 Start-Sleep 10
-Invoke-RestMethod http://localhost:8083/connectors/fbi-src-cdc-src-004-g0/status | ConvertTo-Json -Depth 4
+Invoke-RestMethod -Headers $ch http://localhost:8083/connectors/fbi-src-cdc-src-004-g0/status | ConvertTo-Json -Depth 4
 docker exec fineract-bi-fineract-db psql -U root -d postgres -c "SELECT slot_name, active FROM pg_replication_slots WHERE slot_name LIKE '%004%'"
 ```
 
@@ -405,7 +413,7 @@ The row is not removed in the warehouse. It is marked `_is_deleted = t` with its
 ### 6.5 Prove it is exactly right
 
 ```powershell
-$r = (docker compose --profile python run --rm -T --no-deps -e FINERACT_CDC_PASSWORD=<dev password> extractor python -m controlplane.cli reconcile-source --source-id cdc-src-004 --bucket-size 1000 | Out-String) | ConvertFrom-Json
+$r = (docker compose --profile python run --rm -T --no-deps -e FBI_SRC_DEMO_PASSWORD=<dev password> extractor python -m controlplane.cli reconcile-source --source-id cdc-src-004 --bucket-size 1000 | Out-String) | ConvertFrom-Json
 $r.PSObject.Properties | ForEach-Object { "{0,-34} {1} rows={2}" -f $_.Name, $_.Value.status, $_.Value.compared_rows }
 ```
 
@@ -430,6 +438,15 @@ Switching follows a fixed procedure:
 
 Every ownership change bumps an **epoch**. Writers must present the current epoch and the **database rejects old ones** (SQLSTATE `FBI01`). The sink log line `Batch fenced ... expected epoch 11 ... epoch 12` is this protection working. Every step is written to `meta.ingestion_ownership_audit` with who asked, who approved, when and why.
 
+The rules are enforced in the database as well as in the CLI. The sink and the Python extractor connect as a separate engine role that has no write access to the ownership, audit, settings or registry tables, so a compromised engine cannot flip its own ownership:
+
+- A trigger on `meta.ingestion_ownership` rejects an engine change that did not follow a legal transition (SQLSTATE `FBI03`). A cutover needs a `PASSED` `shadow_vs_prod` reconciliation of the same source and table that finished within `reconciliation_max_age_minutes` (default 120).
+- The approver must differ from the actor and from whoever started the shadow (`shadow_requested_by`).
+- `meta.ingestion_ownership_audit` is append-only, and it records the database login (`db_user`) of every change. The loader role used by the engines cannot update or delete it, and cannot change `meta.platform_settings`.
+- `dual_control_mode` is `parameter` by default: the approver is a name passed on the command line or in the DAG, which is only as trustworthy as whoever runs it. Set it to `database` (as the admin role) when the requester and approver are different people with different database logins. A cutover then needs `meta.approve_cutover()` to have been called by a login other than the one that started the shadow. From PowerShell: run `cpc approve-cutover --source-id default --tables all` under the approver's own database login, then run the cutover.
+- Through Airflow the actor is the authenticated triggering user. Set `FBI_REQUIRE_AUTHENTICATED_ACTOR=true` to refuse runs that only carry a `requested_by` parameter.
+
+
 ### 7.2 Run the tools inside Docker
 
 Debezium (in Docker) and the control-plane tools must refer to the source database by the same address. Inside Docker that is `fineract-bi-fineract-db`, so these helpers run the tools in a container:
@@ -440,8 +457,8 @@ src -c "GRANT CONNECT ON DATABASE fineract_default TO fbi_cdc; GRANT USAGE ON SC
 src -c "CREATE PUBLICATION fbi_cdc FOR TABLE $tl"      # "already exists" is fine
 
 $E = @("-e","SOURCE_DB_HOST=fineract-bi-fineract-db","-e","SOURCE_DB_PORT=5432","-e","SOURCE_DB_NAME=fineract_default",
-       "-e","SOURCE_DB_USER=fbi_cdc","-e","SOURCE_DB_PASSWORD=<dev password>","-e","SOURCE_DB_SECRET_REF=env:FINERACT_CDC_PASSWORD",
-       "-e","FINERACT_CDC_PASSWORD=<dev password>","-e","SOURCE_DB_SCHEMA=bi_connector_source","-e","COB_LOOKBACK_HOURS=999999",
+       "-e","SOURCE_DB_USER=fbi_cdc","-e","FBI_SRC_DEFAULT_PASSWORD=<dev password>","-e","SOURCE_DB_SECRET_REF=env:FBI_SRC_DEMO_PASSWORD",
+       "-e","FBI_SRC_DEMO_PASSWORD=<dev password>","-e","SOURCE_DB_SCHEMA=bi_connector_source","-e","COB_LOOKBACK_HOURS=999999",
        "-e","FBI_DEBEZIUM_PUBLICATION_MODE=disabled","-e","LOG_LEVEL=WARNING")
 function ext { docker compose --profile python run --rm -T --no-deps @E extractor python -m extractor.cli @args }
 function cpc { docker compose --profile python run --rm -T --no-deps @E extractor python -m controlplane.cli @args }
@@ -566,7 +583,7 @@ The **control plane** is the part that decides and manages. It does not move dat
 
 ```powershell
 $env:SOURCE_DB_HOST="fineract-bi-fineract-db"; $env:SOURCE_DB_HOST_PORT="5432"; $env:SOURCE_REPLICA_USER="fbi_cdc"; $env:SOURCE_REPLICA_PASSWORD="<dev password>"
-$env:SOURCE_DB_SECRET_REF="env:FINERACT_CDC_PASSWORD"; $env:FINERACT_CDC_PASSWORD="<dev password>"; $env:FBI_DEBEZIUM_PUBLICATION_MODE="disabled"
+$env:SOURCE_DB_SECRET_REF="env:FBI_SRC_DEMO_PASSWORD"; $env:FBI_SRC_DEMO_PASSWORD="<dev password>"; $env:FBI_DEBEZIUM_PUBLICATION_MODE="disabled"
 $env:AIRFLOW_PARALLELISM="2"; $env:AIRFLOW_MAX_ACTIVE_TASKS_PER_DAG="2"; $env:FBI_POOL_SOURCE_EXTRACT="1"
 docker compose --profile airflow up -d airflow-apiserver airflow-scheduler airflow-dag-processor
 ```
@@ -589,7 +606,7 @@ Run the last line a few times: `queued`, `running`, `success`. When `fbi_python_
 
 **dbt** turns the raw tables into dashboard-ready ones: `staging` (clean names, soft-deleted rows dropped, `source_id` on every join) → `intermediate` (which loans need recomputing, each loan's daily status) → `analytics` dimensions, `fact_loan_snapshot` (one row per loan per day) and the three marts. Three things changed for this feature:
 
-- **Only changed loans are recomputed.** The write path records every change in `meta.entity_change_log`. Each dbt run reads the new entries, recomputes just those loans from their earliest affected date, and advances `meta.dbt_change_cursor` only after a fully successful run.
+- **Only changed loans and partitions are recomputed.** The write path records every change in `meta.entity_change_log`. Each dbt run reads the new entries and recomputes just those loans from their earliest affected date. The fact build also records which (source, office, product) partitions it touched, including the partition a loan or client moved away from, in `meta.dbt_mart_dirty`. Each mart then recomputes only those partitions from the earliest affected date. Every consumer has its own cursor: `fact_loan_snapshot` in `meta.dbt_change_cursor` and each mart in `meta.dbt_mart_cursor`. A cursor advances from that model's own successful build, never because of a test failure, and a mart never reads past the point the fact has reached. Running `dbt build -s +mart_delinquency_par` therefore leaves the other marts' cursors where they were, and they catch up on the next full build.
 - **Metrics are defined once** (`dbt/macros/metrics.sql`, catalog in `dbt/seeds/metric_definitions.csv`) and reused by every mart. A test proves the marts agree.
 - **Removed sources are detected.** `assert_no_orphan_sources_in_marts` fails if derived rows exist for a source that is no longer registered (fix it with `retire-source`, section 13).
 
@@ -639,6 +656,11 @@ Everything is configured through environment variables (see `.env.example` for t
 | Python engine | Page size, parallelism | `EXTRACT_PAGE_SIZE`, `EXTRACT_PARALLELISM`, `EXTRACT_LOOKBACK_SECONDS` | |
 | Airflow | Concurrency | `AIRFLOW_PARALLELISM`, `AIRFLOW_MAX_ACTIVE_TASKS_PER_DAG`, `FBI_POOL_SOURCE_EXTRACT` | |
 | Superset | Dashboard load | worker and cache settings, `SUPERSET_WAREHOUSE_URI` | Point at a read replica for more users |
+| Sink health | When the sink reports unhealthy | `SINK_HEALTH_STUCK_MS` (default 300000) | `/health` fails when batches have kept failing for longer than this |
+| Offset gap | A stored offset older than the log start | `SINK_ALLOW_OFFSET_RESET` (default false) | The sink stops with an error instead of silently skipping events whose topic retention expired |
+| Dead-letter size | Largest value copied into the dead-letter topic | `SINK_DLT_MAX_BYTES` | Larger events are recorded with metadata only (`fbi.dlt.value_omitted`) |
+| Slot cleanup | How often a source's replication slots are inspected | `FBI_SLOT_CLEANUP_INTERVAL_MINUTES` (default 1440), `FBI_SOURCE_CONNECT_TIMEOUT_SECONDS` (default 10) | A source is inspected only when its capture generation, owner or lifecycle state changed since the last check, when it is retired, or once per interval as a safety net. Each connection has a timeout and the task an `execution_timeout` |
+| Change log | Retention of `meta.entity_change_log` | `change_log_retention_days`, `cursor_stale_days`, `progress_retention_days`, `ownership_audit_retention_days` in `meta.platform_settings` | The change log is partitioned by day and whole partitions are dropped by `fbi_maintenance` |
 
 The slowest stage sets the speed, and it is usually the warehouse. For regional topologies, Kafka on Kubernetes (Strimzi) and lag-based autoscaling (KEDA), see the reference manifests in `deploy/k8s/`. They are examples and have not been tested.
 
@@ -659,7 +681,7 @@ The slowest stage sets the speed, and it is usually the warehouse. For regional 
 
 ```powershell
 docker compose --profile cdc ps --format "table {{.Service}}\t{{.State}}\t{{.Status}}"
-(Invoke-RestMethod "http://localhost:8083/connectors?expand=status").PSObject.Properties | ForEach-Object { "{0}: {1} tasks={2}" -f $_.Name, $_.Value.status.connector.state, (($_.Value.status.tasks | ForEach-Object { $_.state }) -join ",") }
+(Invoke-RestMethod -Headers $ch "http://localhost:8083/connectors?expand=status").PSObject.Properties | ForEach-Object { "{0}: {1} tasks={2}" -f $_.Name, $_.Value.status.connector.state, (($_.Value.status.tasks | ForEach-Object { $_.state }) -join ",") }
 docker exec fineract-bi-fineract-db psql -U root -d postgres -c "SELECT slot_name, active FROM pg_replication_slots"
 wh -c "SELECT source_id, connector_name, observed_state, task_states FROM meta.connector_state"
 ```
@@ -753,13 +775,12 @@ wh -c "DELETE FROM meta.source_registry WHERE source_id LIKE 'loadsrc-%'"
 Never just delete rows by hand. Derived dashboard rows would remain and break the dbt tests. Use `retire-source`, which removes the source from every layer in one transaction, blocks writers, and records a new capture generation so a re-created source gets a fresh connector name.
 
 ```powershell
-python -m controlplane.cli retire-source --source-id cdc-src-004 --forget
-Invoke-RestMethod -Method Delete -Uri http://localhost:8083/connectors/fbi-src-cdc-src-004-g0
-docker exec fineract-bi-fineract-db psql -U root -d postgres -c "SELECT pg_drop_replication_slot('fbi_cdc_src_004_g0')"
+python -m controlplane.cli retire-source --source-id cdc-src-004 --dry-run
+python -m controlplane.cli --actor alice retire-source --source-id cdc-src-004 --approved-by bob --forget
 docker exec fineract-bi-fineract-db psql -U root -d postgres -c "DROP DATABASE fineract_src_004"
 ```
 
-In order: `retire-source` removes the data from `raw`, `raw_shadow` and the dbt fact and mart tables and clears the bookkeeping. Then you remove the connector, its slot and the database. (If the connector or slot never existed, the matching command reports "does not exist", which is harmless. Without `--forget` the registry row stays as `RETIRED`.)
+`--dry-run` only counts what would be purged. The real run needs `--approved-by` (a different person, while dual control is on) and refuses an unregistered id unless you pass `--allow-unregistered`. `retire-source` removes the data from `raw`, `raw_shadow` and the dbt fact and mart tables, clears the bookkeeping, deletes the source's Debezium connectors and drops its replication slots on the source. `--forget` deletes the registry row only once the slot is confirmed gone. If the source database cannot be reached, or the slot is still active, the row stays as a `RETIRED` tombstone labelled `forget_after_cleanup`, and the connector reconciler finishes the cleanup and removes the row itself. An abandoned replication slot makes the source database keep WAL until its disk fills, so do not drop the database before the slot is gone.
 
 ---
 
@@ -788,7 +809,11 @@ In order: `retire-source` removes the data from `raw`, `raw_shadow` and the dbt 
 - Measured on a laptop with synthetic events. No 24-hour soak test and no server-class hardware run.
 - Multi-broker Kafka (RF=3) is configured but not fault-tested, and source-database failover is not drilled.
 - The Kubernetes manifests in `deploy/k8s/` and `compose.kafka-cluster.yaml` are references that have not been tested.
-- Secret references support `env:` and file placeholders. A Vault-style resolver is a follow-up.
+- Secret references support allowlisted `env:` names and `file:` paths below `FBI_SECRET_DIR`. A Vault-style resolver is a follow-up.
+- A mart that falls behind keeps its entries in `meta.dbt_mart_dirty` until it catches up. A mart that is dropped from the project must have its row removed from `meta.dbt_mart_cursor`, or the log is never pruned. After upgrading from the single-cursor design, run one `dbt build --full-refresh`.
+- The sink and the Python extractor run as the **engine** role (`WAREHOUSE_ENGINE_USER`). It can write `raw` and `raw_shadow`, offsets, watermarks, progress and the change log, and read the control tables, but cannot change ownership, the audit trail, platform settings, the registry or reconciliation records. dbt, Airflow and the control-plane CLI use the **loader** role. The Compose `extractor` service also carries loader credentials because it doubles as the host for `cpc`; give production extraction workers the engine credentials only.
+- The sink's delivery paths are tested twice: with a mock Kafka consumer (rebalance, outage, holds, offset gaps) and with Testcontainers against a real Kafka broker and a real PostgreSQL (`SinkKafkaPostgresTest`: exactly-once application, restart from warehouse offsets, a second sink joining the group, a poison event, a paused table and a stale epoch). The container tests are skipped when Docker is not available, and CI fails if they were skipped.
+- A source that was already loaded with `date_of_birth` keeps those values in `raw` until it is re-backfilled, because the CDC engine leaves an excluded column alone instead of overwriting it.
 - No metrics server or alerting is bundled. Alert delivery to people is a follow-up.
 - No replay tool for dead-lettered events yet.
 - CDC supports PostgreSQL sources only. MySQL and MariaDB Fineract sources are out of scope (the Python engine works with any PostgreSQL).

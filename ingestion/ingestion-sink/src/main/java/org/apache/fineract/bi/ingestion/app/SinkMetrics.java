@@ -110,6 +110,14 @@ public final class SinkMetrics implements AutoCloseable {
         holds.increment();
     }
 
+    public void absentColumn(String table, String column) {
+        registry.counter("fbi_sink_absent_column_total", "table", table, "column", column).increment();
+    }
+
+    public void offsetGap() {
+        registry.counter("fbi_sink_offset_gap_total").increment();
+    }
+
     public long lastSuccessMillis() {
         return lastSuccessMillis.get();
     }

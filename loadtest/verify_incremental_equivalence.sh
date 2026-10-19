@@ -10,6 +10,9 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 set -euo pipefail
 
@@ -44,7 +47,7 @@ fingerprint() {
 
 run_python_engine() {
     SOURCE_DB_HOST=localhost SOURCE_DB_PORT=5433 SOURCE_DB_USER="${SOURCE_REPLICA_USER}" \
-    SOURCE_DB_PASSWORD="${SOURCE_REPLICA_PASSWORD}" SOURCE_DB_SCHEMA="${SOURCE_DB_SCHEMA:-bi_connector_source}" \
+    FBI_SRC_DEFAULT_PASSWORD="${SOURCE_REPLICA_PASSWORD}" SOURCE_DB_SCHEMA="${SOURCE_DB_SCHEMA:-bi_connector_source}" \
     WAREHOUSE_DB_HOST=localhost WAREHOUSE_DB_PORT=5434 WAREHOUSE_DB_USER="${WAREHOUSE_LOADER_USER}" \
     WAREHOUSE_DB_PASSWORD="${WAREHOUSE_LOADER_PASSWORD}" COB_LOOKBACK_HOURS=999999 LOG_LEVEL=WARNING \
     python -m extractor.cli "$1" >/dev/null
@@ -87,9 +90,43 @@ docker compose exec -T dbt dbt build --full-refresh --exclude "test_type:singula
 B="$(fingerprint)"
 echo "incremental : ${A}"
 echo "full refresh: ${B}"
-if [[ "${A}" == "${B}" ]]; then
-    echo "[equivalence] PASSED - incremental build equals full recomputation"
-else
+if [[ "${A}" != "${B}" ]]; then
     echo "[equivalence] FAILED - incremental build diverged from full recomputation" >&2
+    exit 1
+fi
+echo "[equivalence] PASSED - incremental build equals full recomputation"
+
+mart_cursor() { wh_sql "select coalesce(last_run_id, 0) from meta.dbt_mart_cursor where model_name = '$1'"; }
+
+echo "[equivalence] round 2: a partial build must advance only the consumers that ran"
+src_sql "
+INSERT INTO m_loan_transaction (id, loan_id, office_id, is_reversed, transaction_type_enum, transaction_date, amount,
+    principal_portion_derived, interest_portion_derived, submitted_on_date, created_by, last_modified_by,
+    created_on_utc, last_modified_on_utc, outstanding_loan_balance_derived)
+SELECT (SELECT max(id) + 1 FROM m_loan_transaction), l.id, 1, false, 2, CURRENT_DATE - 30, 321.00, 300, 21.00,
+       CURRENT_DATE - 30, 1, 1, NOW(), NOW(), 111.11
+FROM m_loan l WHERE l.disbursedon_date < CURRENT_DATE - 100 ORDER BY l.id DESC LIMIT 1;"
+run_python_engine incremental
+before_health="$(mart_cursor mart_portfolio_health)"
+before_repay="$(mart_cursor mart_repayment_behavior)"
+docker compose exec -T dbt dbt build --select +mart_delinquency_par --exclude "test_type:singular" -q >/dev/null
+after_par="$(mart_cursor mart_delinquency_par)"
+after_health="$(mart_cursor mart_portfolio_health)"
+after_repay="$(mart_cursor mart_repayment_behavior)"
+echo "cursors after partial build: par=${after_par} health=${after_health} (was ${before_health}) repay=${after_repay} (was ${before_repay})"
+if [[ "${after_health}" != "${before_health}" || "${after_repay}" != "${before_repay}" || "${after_par}" -le "${before_health}" ]]; then
+    echo "[equivalence] FAILED - a partial build advanced a consumer that did not run" >&2
+    exit 1
+fi
+docker compose exec -T dbt dbt build --exclude "test_type:singular" -q >/dev/null
+A2="$(fingerprint)"
+docker compose exec -T dbt dbt build --full-refresh --exclude "test_type:singular" -q >/dev/null
+B2="$(fingerprint)"
+echo "incremental : ${A2}"
+echo "full refresh: ${B2}"
+if [[ "${A2}" == "${B2}" ]]; then
+    echo "[equivalence] PASSED - consumers that were skipped caught up from their own cursors"
+else
+    echo "[equivalence] FAILED - a skipped consumer lost changes" >&2
     exit 1
 fi

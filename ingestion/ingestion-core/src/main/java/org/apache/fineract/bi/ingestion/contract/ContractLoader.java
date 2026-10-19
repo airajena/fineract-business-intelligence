@@ -61,7 +61,8 @@ public final class ContractLoader {
                         c.path("type").asText(),
                         cdc,
                         c.path("synthetic").asBoolean(false),
-                        c.path("pii").asBoolean(false)));
+                        c.path("pii").asBoolean(false),
+                        c.path("cdc_unit").asText(ColumnSpec.MICROS)));
             }
             JsonNode cursor = t.path("python_cursor");
             tables.add(new TableContract(

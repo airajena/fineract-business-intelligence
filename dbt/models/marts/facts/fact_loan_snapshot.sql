@@ -14,6 +14,9 @@
 -- limitations under the License.
 
 -- depends_on: {{ ref('int_snapshot_scope') }}
+-- depends_on: {{ ref('stg_m_loan') }}
+-- depends_on: {{ ref('stg_m_client') }}
+-- depends_on: {{ ref('int_change_window') }}
 {{
     config(
         materialized='incremental',
@@ -25,6 +28,7 @@
         ],
         pre_hook=[
             "{{ heavy_model_settings() }}",
+            "{% if is_incremental() %}{{ record_dirty_partitions('before') }}{% else %}select 1{% endif %}",
             "{% if is_incremental() %}
             delete from {{ this }} f
             using {{ ref('int_snapshot_scope') }} s
@@ -32,9 +36,21 @@
               and f.tenant_id = s.tenant_id
               and f.loan_id = s.loan_id
               and f.snapshot_date >= s.from_date
+            {% else %}select 1{% endif %}",
+            "{% if is_incremental() %}
+            delete from {{ this }} f
+            using {{ ref('int_snapshot_scope') }} s, {{ ref('stg_m_loan') }} l
+            where f.source_id = s.source_id
+              and f.tenant_id = s.tenant_id
+              and f.loan_id = s.loan_id
+              and l.source_id = f.source_id
+              and l.tenant_id = f.tenant_id
+              and l.loan_id = f.loan_id
+              and f.snapshot_date < l.disbursedon_date
             {% else %}select 1{% endif %}"
         ],
         post_hook=[
+            "{{ record_dirty_partitions('after') }}",
             "{% if var('snapshot_daily_retention_days', none) is not none %}
             delete from {{ this }}
             where snapshot_date < current_date - {{ var('snapshot_daily_retention_days') | int }}

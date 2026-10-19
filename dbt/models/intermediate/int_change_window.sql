@@ -9,6 +9,9 @@
 --
 -- Unless required by applicable law or agreed to in writing, software
 -- distributed under the License is distributed on an "AS IS" BASIS,
+-- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-- See the License for the specific language governing permissions and
+-- limitations under the License.
 
 {{ config(materialized='table', post_hook=['analyze {{ this }}']) }}
 
@@ -17,12 +20,14 @@
 select
     coalesce(
         (
-            select c.last_change_id
+            select c.last_txid
             from {{ source('meta', 'dbt_change_cursor') }} c
             where c.model_name = 'fact_loan_snapshot'
         ),
-        0
-    )::bigint as last_change_id,
+        '0'::xid8
+    ) as last_txid,
+    pg_snapshot_xmin(pg_current_snapshot()) as horizon_txid,
+    nextval('meta.dbt_run_seq')::bigint as run_id,
     coalesce(
         (select max(l.change_id) from {{ source('meta', 'entity_change_log') }} l),
         0

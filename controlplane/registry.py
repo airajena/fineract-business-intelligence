@@ -9,6 +9,9 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 
 from controlplane.db import rows_as_dicts
+from controlplane.secrets import SecretError, check_reference
 
 SOURCE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 
@@ -68,8 +72,11 @@ class SourceRecord:
             )
         if self.lifecycle_state not in LIFECYCLE_TRANSITIONS:
             raise RegistryError(f"Unknown lifecycle state {self.lifecycle_state}")
-        if self.secret_ref and not re.match(r"^(env|file|vault):", self.secret_ref):
-            raise RegistryError("secret_ref must be a reference (env:, file:, vault:), never a credential")
+        if self.secret_ref:
+            try:
+                check_reference(self.secret_ref)
+            except SecretError as exc:
+                raise RegistryError(f"secret_ref rejected: {exc}") from exc
 
     @property
     def slot_name(self) -> str:

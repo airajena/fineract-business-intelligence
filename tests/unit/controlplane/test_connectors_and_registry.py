@@ -9,6 +9,9 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 from __future__ import annotations
 
@@ -31,9 +34,12 @@ def settings(**kw) -> CdcSettings:
     return CdcSettings(connect_clusters={"default": "http://connect:8083"}, **kw)
 
 
-def test_connector_config_is_secret_free_minimal_and_routed(source_record, contract):
+def test_connector_config_is_secret_free_minimal_and_routed(source_record, contract, monkeypatch):
+    monkeypatch.delenv("FBI_DEFAULT_SSLMODE", raising=False)
     cfg = build_connector_config(source_record, contract, settings())
-    assert cfg["database.password"] == "${env:TEST_SOURCE_PASSWORD}"
+    assert cfg["database.password"] == "${env:FBI_SRC_TEST_PASSWORD}"
+    assert cfg["database.sslmode"] == "verify-full"
+    assert not any(k.startswith("producer.override.") for k in cfg), "per-connector client overrides are disabled"
     assert "secret" not in str(cfg).lower().replace("secret_ref", "")
     assert cfg["topic.prefix"] == "branch-001"
     assert cfg["slot.name"] == "fbi_branch_001_g3"
@@ -43,10 +49,31 @@ def test_connector_config_is_secret_free_minimal_and_routed(source_record, contr
     assert cfg["transforms.heartbeat.replacement"] == "fineract.cdc.heartbeats"
     assert "public.m_loan_transaction" in cfg["table.include.list"].split(",")
     cols = cfg["column.include.list"]
-    assert r"public\.m_client\.date_of_birth" in cols
+    assert r"public\.m_client\.date_of_birth" not in cols, "pii columns stay out of the capture by default"
+    assert r"public\.m_client\.office_id" in cols
     assert r"public\.m_office\.created_on_utc" not in cols
     assert r"public\.batch_job_execution\.create_time" in cols
     assert cfg["signal.enabled.channels"] == "kafka"
+
+
+def test_pii_columns_are_captured_only_when_explicitly_allowed(source_record, contract):
+    cfg = build_connector_config(source_record, contract, settings(exclude_pii=False))
+    assert r"public\.m_client\.date_of_birth" in cfg["column.include.list"]
+
+
+def test_sslmode_comes_from_label_then_environment_default(source_record, contract, monkeypatch):
+    labelled = SourceRecord(**{**source_record.__dict__, "labels": {"sslmode": "require"}})
+    assert build_connector_config(labelled, contract, settings())["database.sslmode"] == "require"
+    monkeypatch.setenv("FBI_DEFAULT_SSLMODE", "disable")
+    assert build_connector_config(source_record, contract, settings())["database.sslmode"] == "disable"
+
+
+@pytest.mark.parametrize("label", ["heartbeat_table", "signal_table"])
+@pytest.mark.parametrize("bad", ["x; DROP TABLE y", "a b", "x'--", "1abc", "a.b.c"])
+def test_label_identifiers_are_validated_before_reaching_source_sql(source_record, contract, label, bad):
+    rec = SourceRecord(**{**source_record.__dict__, "labels": {label: bad}})
+    with pytest.raises(ValueError, match=label):
+        build_connector_config(rec, contract, settings())
 
 
 def test_connector_config_requires_connection_details(contract):
@@ -90,6 +117,15 @@ def test_plan_creates_updates_restarts_and_deletes():
     assert deferred == []
 
 
+def test_settings_that_are_no_longer_desired_count_as_drift():
+    name = connector_name("s1", 0)
+    observed = {"default": {name: _observed(name, config={"a": "1", "producer.override.acks": "all", "name": name})}}
+    actions, _ = plan_actions([_desired(1)], observed, settings())
+    assert [(a.kind, a.name) for a in actions] == [(ActionKind.UPDATE, name)]
+    clean = {"default": {name: _observed(name, config={"a": "1", "name": name})}}
+    assert plan_actions([_desired(1)], clean, settings())[0] == []
+
+
 def test_blast_radius_limits_defer_work():
     desired = [_desired(i) for i in range(10)]
     observed = {"default": {connector_name(f"old{i}", 0): _observed(connector_name(f"old{i}", 0)) for i in range(5)}}
@@ -97,6 +133,14 @@ def test_blast_radius_limits_defer_work():
     assert sum(a.kind is ActionKind.CREATE for a in actions) == 3
     assert sum(a.kind is ActionKind.DELETE for a in actions) == 2
     assert len(deferred) == 7 + 3
+
+
+def test_connectors_of_sources_with_unbuildable_config_are_never_deleted():
+    unknown = connector_name("broken", 3)
+    gone = connector_name("gone", 0)
+    observed = {"default": {unknown: _observed(unknown), gone: _observed(gone)}}
+    actions, _ = plan_actions([], observed, settings(), protected=frozenset({unknown}))
+    assert [(a.kind, a.name) for a in actions] == [(ActionKind.DELETE, connector_name("gone", 0))]
 
 
 def test_orphan_deletion_can_be_disabled():
@@ -128,22 +172,69 @@ def test_source_ids_must_be_topic_and_slot_safe(bad):
 
 
 def test_secret_refs_never_hold_credentials():
-    with pytest.raises(RegistryError, match="reference"):
+    with pytest.raises(RegistryError, match="rejected"):
         SourceRecord("s1", "t", secret_ref="hunter2").validate()
 
 
+def test_registry_and_resolver_accept_the_same_schemes():
+    with pytest.raises(RegistryError, match="rejected"):
+        SourceRecord("s1", "t", secret_ref="vault:secret/data/s1#password").validate()
+    with pytest.raises(SecretError):
+        resolve("vault:secret/data/s1#password")
+    with pytest.raises(SecretError):
+        connect_placeholder("vault:secret/data/s1#password")
+    SourceRecord("s1", "t", secret_ref="env:FBI_SRC_S1_PASSWORD").validate()
+
+
 def test_secret_resolution(monkeypatch, tmp_path):
-    monkeypatch.setenv("FBI_TEST_PW", "s3cret")
-    assert resolve("env:FBI_TEST_PW") == "s3cret"
+    monkeypatch.setenv("FBI_SRC_TEST_PW", "s3cret")
+    assert resolve("env:FBI_SRC_TEST_PW") == "s3cret"
     f = tmp_path / "creds.properties"
     f.write_text("# comment\npassword = abc=def\n", encoding="utf-8")
+    monkeypatch.setenv("FBI_SECRET_DIR", str(tmp_path))
     if f.as_posix().startswith("/"):
         assert resolve(f"file:{f.as_posix()}:password") == "abc=def"
-    assert connect_placeholder("env:FBI_TEST_PW") == "${env:FBI_TEST_PW}"
+    assert connect_placeholder("env:FBI_SRC_TEST_PW") == "${env:FBI_SRC_TEST_PW}"
     with pytest.raises(SecretError):
-        resolve("env:FBI_DOES_NOT_EXIST_123")
+        resolve("env:FBI_SRC_DOES_NOT_EXIST_123")
     with pytest.raises(SecretError):
         resolve("plaintext")
+
+
+@pytest.mark.parametrize(
+    "name", ["WAREHOUSE_DB_PASSWORD", "AIRFLOW__API_AUTH__JWT_SECRET", "PATH", "AWS_SECRET_ACCESS_KEY"]
+)
+def test_secret_refs_cannot_name_arbitrary_worker_secrets(monkeypatch, name):
+    monkeypatch.setenv(name, "value")
+    with pytest.raises(SecretError, match="not allowed"):
+        resolve(f"env:{name}")
+    with pytest.raises(SecretError, match="not allowed"):
+        connect_placeholder(f"env:{name}")
+    with pytest.raises(RegistryError, match="rejected"):
+        SourceRecord("s1", "t", secret_ref=f"env:{name}").validate()
+
+
+def test_secret_file_references_are_confined_to_the_secret_directory(monkeypatch, tmp_path):
+    inside = tmp_path / "secrets"
+    inside.mkdir()
+    monkeypatch.setenv("FBI_SECRET_DIR", str(inside))
+    outside = tmp_path / "other.properties"
+    outside.write_text("password = x\n", encoding="utf-8")
+    ref = f"file:{outside.as_posix()}:password"
+    if outside.as_posix().startswith("/"):
+        with pytest.raises(SecretError, match="outside"):
+            resolve(ref)
+        monkeypatch.delenv("FBI_SECRET_DIR")
+        with pytest.raises(SecretError, match="FBI_SECRET_DIR"):
+            resolve(ref)
+
+
+def test_env_allowlist_is_configurable(monkeypatch):
+    monkeypatch.setenv("FBI_SECRET_ENV_ALLOWLIST", "CUSTOM_[A-Z]+")
+    monkeypatch.setenv("CUSTOM_PW", "p")
+    assert resolve("env:CUSTOM_PW") == "p"
+    with pytest.raises(SecretError):
+        resolve("env:FBI_SRC_TEST_PW")
 
 
 @pytest.mark.parametrize("state,path", [

@@ -46,6 +46,7 @@ class ExtractSettings:
     parallelism: int = 4
     default_engine: str = "PYTHON"
     writer_id: str = "python"
+    exclude_pii: bool = True
 
     @classmethod
     def from_env(cls) -> ExtractSettings:
@@ -62,6 +63,7 @@ class ExtractSettings:
             parallelism=int(os.getenv("EXTRACT_PARALLELISM", "4")),
             default_engine=engine,
             writer_id=os.getenv("EXTRACT_WRITER_ID", f"python-{socket.gethostname()}"),
+            exclude_pii=_bool("FBI_EXCLUDE_PII", True),
         )
 
 
@@ -77,7 +79,7 @@ class EnvSourceBootstrap:
     compat_schema: str
     ssl_mode: str
     cob_job_name: str
-    secret_ref: str = "env:SOURCE_DB_PASSWORD"
+    secret_ref: str = "env:FBI_SRC_DEFAULT_PASSWORD"
 
     @classmethod
     def from_env(cls) -> EnvSourceBootstrap | None:
@@ -93,9 +95,9 @@ class EnvSourceBootstrap:
             compat_schema=os.getenv("SOURCE_DB_SCHEMA", "bi_connector_source"),
             ssl_mode=os.getenv("SOURCE_DB_SSL_MODE", "disable"),
             cob_job_name=os.getenv("COB_JOB_NAME", "LOAN_COB"),
-            secret_ref=os.getenv("SOURCE_DB_SECRET_REF", "env:SOURCE_DB_PASSWORD"),
+            secret_ref=os.getenv("SOURCE_DB_SECRET_REF", "env:FBI_SRC_DEFAULT_PASSWORD"),
         )
 
 
 def warehouse_config() -> PgConfig:
-    return warehouse_config_from_env(application_name="fbi-python-engine")
+    return warehouse_config_from_env(application_name="fbi-python-engine", engine=True)

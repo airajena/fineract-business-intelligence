@@ -20,10 +20,21 @@ package org.apache.fineract.bi.ingestion.contract;
 
 import java.util.List;
 
-public record ColumnSpec(String name, String type, List<String> cdc, boolean synthetic, boolean pii) {
+public record ColumnSpec(String name, String type, List<String> cdc, boolean synthetic, boolean pii, String cdcUnit) {
+
+    public static final String MICROS = "micros";
+    public static final String MILLIS = "millis";
 
     public ColumnSpec {
         cdc = cdc == null || cdc.isEmpty() ? List.of(name) : List.copyOf(cdc);
+        cdcUnit = cdcUnit == null || cdcUnit.isBlank() ? MICROS : cdcUnit;
+        if (!MICROS.equals(cdcUnit) && !MILLIS.equals(cdcUnit)) {
+            throw new IllegalArgumentException("cdc_unit of " + name + " must be micros or millis, got " + cdcUnit);
+        }
+    }
+
+    public ColumnSpec(String name, String type, List<String> cdc, boolean synthetic, boolean pii) {
+        this(name, type, cdc, synthetic, pii, MICROS);
     }
 
     public List<String> candidates() {

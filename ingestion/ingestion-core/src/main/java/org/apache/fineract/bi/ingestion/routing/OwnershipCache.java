@@ -29,7 +29,7 @@ import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public final class OwnershipCache {
+public final class OwnershipCache implements OwnershipView {
 
     private static final Logger LOG = LoggerFactory.getLogger(OwnershipCache.class);
 
@@ -48,10 +48,12 @@ public final class OwnershipCache {
         this.minRefreshIntervalMillis = minRefreshIntervalMillis;
     }
 
+    @Override
     public OwnershipSnapshot snapshot() {
         return current.get();
     }
 
+    @Override
     public synchronized OwnershipSnapshot refresh(boolean force) throws SQLException {
         OwnershipSnapshot existing = current.get();
         long now = System.currentTimeMillis();

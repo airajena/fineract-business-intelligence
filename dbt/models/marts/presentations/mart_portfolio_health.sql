@@ -13,14 +13,14 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 
--- depends_on: {{ ref('int_snapshot_scope') }}
+-- depends_on: {{ ref('int_change_window') }}
 {{
     config(
         materialized='incremental',
         incremental_strategy='append',
         on_schema_change='append_new_columns',
         indexes=[{'columns': ['source_id', 'snapshot_date']}, {'columns': ['snapshot_date']}],
-        pre_hook=["{{ heavy_model_settings() }}", "{{ mart_delete_recompute_window('snapshot_date') }}"]
+        pre_hook=["{{ heavy_model_settings() }}", "{{ mart_delete_recompute_window('mart_portfolio_health', 'snapshot_date') }}"]
     )
 }}
 
@@ -43,9 +43,11 @@ with snapshot_base as (
         f.is_watch_list
     from {{ ref('fact_loan_snapshot') }} as f
     {% if is_incremental() %}
-        inner join ({{ mart_recompute_window('snapshot_date') }}) as w
+        inner join ({{ mart_recompute_window('mart_portfolio_health') }}) as w
             on
                 f.source_id = w.source_id
+                and f.office_id is not distinct from w.office_id
+                and f.product_id is not distinct from w.product_id
                 and f.snapshot_date >= w.recompute_from
     {% endif %}
 ),
@@ -111,9 +113,11 @@ flow_metrics as (
             and t.tenant_id = ld.tenant_id
             and t.loan_id = ld.loan_id
     {% if is_incremental() %}
-        inner join ({{ mart_recompute_window('snapshot_date') }}) as w
+        inner join ({{ mart_recompute_window('mart_portfolio_health') }}) as w
             on
                 t.source_id = w.source_id
+                and ld.office_id is not distinct from w.office_id
+                and ld.product_id is not distinct from w.product_id
                 and t.transaction_date >= w.recompute_from
     {% endif %}
     where t.is_reversed = false

@@ -48,6 +48,9 @@ public record SinkConfig(
         int metricsPort,
         long maxBackoffMs,
         boolean startFromEarliestWithoutDbOffset,
+        long healthStuckMs,
+        boolean allowOffsetReset,
+        int dltMaxBytes,
         Properties consumerOverrides,
         Properties producerOverrides) {
 
@@ -77,6 +80,9 @@ public record SinkConfig(
                 env.integer("SINK_METRICS_PORT", 9404),
                 env.longValue("SINK_MAX_BACKOFF_MS", 30_000),
                 env.bool("SINK_START_FROM_EARLIEST_WITHOUT_DB_OFFSET", true),
+                env.longValue("SINK_HEALTH_STUCK_MS", 300_000),
+                env.bool("SINK_ALLOW_OFFSET_RESET", false),
+                env.integer("SINK_DLT_MAX_BYTES", 3_900_000),
                 Env.prefixed(environment, "SINK_KAFKA_"),
                 Env.prefixed(environment, "SINK_PRODUCER_"));
     }

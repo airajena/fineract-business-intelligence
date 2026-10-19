@@ -48,7 +48,7 @@
       "primary_key": "id",
       "python_cursor": "last_modified_on_utc",
       "kafka_partitions": 12,
-      "change_tracking": {"entity": "client", "key": "id", "date": null},
+      "change_tracking": {"entity": "client", "key": "id", "date": null, "history_columns": ["office_id"]},
       "columns": [
         {"name": "id", "type": "bigint"},
         {"name": "account_no", "type": "text"},
@@ -104,7 +104,7 @@
       "primary_key": "id",
       "python_cursor": "last_modified_on_utc",
       "kafka_partitions": 24,
-      "change_tracking": {"entity": "loan", "key": "id", "date": "disbursedon_date"},
+      "change_tracking": {"entity": "loan", "key": "id", "date": "disbursedon_date", "history_columns": ["client_id", "product_id", "currency_code", "loan_status_id", "principal_amount", "principal_disbursed_derived", "total_expected_repayment_derived", "disbursedon_date", "maturedon_date", "expected_maturedon_date", "is_npa"]},
       "columns": [
         {"name": "id", "type": "bigint"},
         {"name": "account_no", "type": "text"},
@@ -163,7 +163,7 @@
       "primary_key": "id",
       "python_cursor": "last_modified_on_utc",
       "kafka_partitions": 48,
-      "change_tracking": {"entity": "loan", "key": "loan_id", "date": "transaction_date"},
+      "change_tracking": {"entity": "loan", "key": "loan_id", "date": "transaction_date", "history_columns": ["loan_id", "office_id", "is_reversed", "transaction_type_enum", "transaction_date", "amount", "principal_portion_derived", "interest_portion_derived", "fee_charges_portion_derived", "penalty_charges_portion_derived", "overpayment_portion_derived", "outstanding_loan_balance_derived"]},
       "indexes": [["loan_id", "transaction_date"]],
       "columns": [
         {"name": "id", "type": "bigint"},
@@ -190,7 +190,7 @@
       "primary_key": "id",
       "python_cursor": "lastmodified_date",
       "kafka_partitions": 48,
-      "change_tracking": {"entity": "loan", "key": "loan_id", "date": "duedate"},
+      "change_tracking": {"entity": "loan", "key": "loan_id", "date": "duedate", "history_columns": ["loan_id", "fromdate", "duedate", "installment", "principal_amount", "principal_completed_derived", "principal_writtenoff_derived", "interest_amount", "interest_completed_derived", "interest_writtenoff_derived", "interest_waived_derived", "fee_charges_amount", "fee_charges_completed_derived", "fee_charges_writtenoff_derived", "fee_charges_waived_derived", "penalty_charges_amount", "penalty_charges_completed_derived", "penalty_charges_writtenoff_derived", "penalty_charges_waived_derived", "completed_derived", "obligations_met_on_date", "is_re_aged"]},
       "indexes": [["loan_id", "duedate"]],
       "columns": [
         {"name": "id", "type": "bigint"},
@@ -272,7 +272,7 @@
       "primary_key": "id",
       "python_cursor": "last_modified_on_utc",
       "kafka_partitions": 12,
-      "change_tracking": {"entity": "loan", "key": "loan_id", "date": "addedon_date"},
+      "change_tracking": {"entity": "loan", "key": "loan_id", "date": "addedon_date", "history_columns": ["delinquency_range_id", "loan_id", "addedon_date", "liftedon_date"]},
       "indexes": [["loan_id"]],
       "columns": [
         {"name": "id", "type": "bigint"},

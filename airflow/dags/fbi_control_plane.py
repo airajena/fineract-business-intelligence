@@ -9,6 +9,9 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 
 from __future__ import annotations
@@ -32,13 +35,16 @@ DEFAULT_ARGS = {"owner": "fbi-platform", "retries": 2, "retry_delay": timedelta(
     doc_md=__doc__,
 )
 def fbi_connector_reconciler():
-    @task
+    @task(execution_timeout=timedelta(minutes=2))
     def plan_shards() -> list[dict]:
         from controlplane.tasks import shard_plan
 
         return shard_plan()
 
-    @task(max_active_tis_per_dagrun=8)
+    @task(
+        max_active_tis_per_dagrun=8,
+        execution_timeout=timedelta(minutes=int(os.getenv("FBI_RECONCILE_TIMEOUT_MINUTES", "10"))),
+    )
     def reconcile_shard(shard: dict) -> dict:
         from controlplane.tasks import reconcile_connectors_shard
 

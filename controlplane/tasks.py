@@ -9,6 +9,9 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 
 from __future__ import annotations
@@ -22,7 +25,7 @@ from controlplane import reconcile as data_reconcile
 from controlplane import secrets
 from controlplane.connectors import CdcSettings
 from controlplane.contract import load_contract
-from controlplane.db import PgConfig, connect, rows_as_dicts, warehouse_config_from_env
+from controlplane.db import connect, rows_as_dicts, source_pg_config, warehouse_config_from_env
 from controlplane.ownership import Action, Engine, TransitionRequest
 from controlplane.ownership_repo import OwnershipRepository
 from controlplane.reconciler import reconcile
@@ -151,9 +154,7 @@ def cutover_gate(source_id: str, tables: str, actor: str, settle_seconds: int, m
 
 def validate_source(source: SourceRecord, engine: str) -> dict:
     checks: dict[str, object] = {}
-    cfg = PgConfig(source.db_host or "", source.db_port, source.db_name or "", source.db_user or "",
-                   secrets.resolve(source.secret_ref), source.labels.get("sslmode", "disable"),
-                   application_name="fbi-onboarding")
+    cfg = source_pg_config(source, secrets.resolve(source.secret_ref), "fbi-onboarding")
     conn = connect(cfg)
     try:
         cur = conn.cursor()
@@ -244,9 +245,7 @@ def source_reconcile_shard(index: int, count: int, max_discrepancies: int = 0) -
                  if o.engine in (Engine.PYTHON, Engine.KAFKA)}
         conn.commit()
         for s in sources:
-            src = connect(PgConfig(s.db_host or "", s.db_port, s.db_name or "", s.db_user or "",
-                                   secrets.resolve(s.secret_ref), s.labels.get("sslmode", "disable"),
-                                   application_name="fbi-reconcile"))
+            src = connect(source_pg_config(s, secrets.resolve(s.secret_ref), "fbi-reconcile"))
             try:
                 for t in contract.tables:
                     if (s.source_id, t.table_name) not in owned:
@@ -272,19 +271,20 @@ def maintenance() -> dict:
     conn = _wh()
     try:
         cur = conn.cursor()
-        cur.execute(
-            """
-            DELETE FROM meta.entity_change_log
-            WHERE change_id <= COALESCE((SELECT MIN(last_change_id) FROM meta.dbt_change_cursor), 0)
-              AND changed_at < NOW() - make_interval(days => meta.setting('change_log_retention_days', '14')::int)
-            """
-        )
-        purged_changes = cur.rowcount
-        cur.execute("DELETE FROM meta.ingestion_audit WHERE minute_bucket < NOW() - INTERVAL '30 days'")
-        purged_audit = cur.rowcount
+        cur.execute("SELECT meta.purge_change_log()")
+        dropped_partitions = cur.fetchone()[0]
+        cur.execute("SELECT meta.purge_progress()")
+        purged_progress = cur.fetchone()[0]
+        cur.execute("SELECT meta.purge_ownership_audit()")
+        purged_audit = cur.fetchone()[0]
         cur.execute("DELETE FROM meta.reconciliation_run WHERE started_at < NOW() - INTERVAL '180 days'")
         purged_recon = cur.rowcount
         conn.commit()
     finally:
         conn.close()
-    return {"change_log": purged_changes, "audit": purged_audit, "reconciliation": purged_recon}
+    return {
+        "change_log_partitions_dropped": dropped_partitions,
+        "progress_and_audit_rows": purged_progress,
+        "ownership_audit_rows": purged_audit,
+        "reconciliation": purged_recon,
+    }

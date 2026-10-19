@@ -9,6 +9,9 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 
 from __future__ import annotations
@@ -33,8 +36,10 @@ def own(engine=Engine.PYTHON, shadow=None, state=CutoverState.STEADY, epoch=1, r
     return Ownership("branch-001", "m_loan", engine, shadow, state, epoch, recon)
 
 
-def req(action, engine=None, actor="alice", approved_by=None, passed=None, rid=None, dual=True) -> TransitionRequest:
-    return TransitionRequest(action, actor, "test", engine, approved_by, passed, rid, dual)
+def req(
+    action, engine=None, actor="alice", approved_by=None, passed=None, rid=None, dual=True, valid=True, db=False
+) -> TransitionRequest:
+    return TransitionRequest(action, actor, "test", engine, approved_by, passed, rid, dual, valid, db)
 
 
 def test_assign_only_from_unowned():
@@ -97,6 +102,39 @@ def test_dual_control_can_be_disabled_by_platform_setting():
     ready = own(Engine.PYTHON, Engine.KAFKA, CutoverState.CUTOVER_READY, 3, recon=5)
     r = transition(ready, req(Action.CUTOVER, actor="alice", approved_by=None, dual=False))
     assert r.current.engine is Engine.KAFKA
+
+
+def test_cutover_needs_a_recent_passed_reconciliation_of_this_table():
+    ready = own(Engine.PYTHON, Engine.KAFKA, CutoverState.CUTOVER_READY, 3, recon=5)
+    for valid in (False, None):
+        with pytest.raises(TransitionError, match="recent PASSED"):
+            transition(ready, req(Action.CUTOVER, approved_by="bob", valid=valid))
+
+
+def test_approver_must_also_differ_from_whoever_started_the_shadow():
+    started = transition(own(Engine.PYTHON), req(Action.START_SHADOW, Engine.KAFKA, actor="carol")).current
+    assert started.shadow_requested_by == "carol"
+    ready = Ownership(
+        started.source_id, started.table_name, started.engine, started.shadow_engine,
+        CutoverState.CUTOVER_READY, started.epoch, 5, started.shadow_requested_by,
+    )
+    with pytest.raises(TransitionError, match="started the shadow"):
+        transition(ready, req(Action.CUTOVER, actor="alice", approved_by="carol"))
+    done = transition(ready, req(Action.CUTOVER, actor="alice", approved_by="bob")).current
+    assert done.shadow_requested_by is None
+
+
+def test_database_enforced_approval_leaves_the_identity_check_to_the_database():
+    ready = Ownership("s", "m_loan", Engine.PYTHON, Engine.KAFKA, CutoverState.CUTOVER_READY, 3, 5, "alice")
+    done = transition(ready, req(Action.CUTOVER, actor="alice", approved_by="db_login_b", db=True)).current
+    assert done.engine is Engine.KAFKA
+    with pytest.raises(TransitionError, match="approved_by"):
+        transition(ready, req(Action.CUTOVER, actor="alice", approved_by=None, db=True))
+
+
+def test_abort_shadow_forgets_who_requested_it():
+    started = transition(own(Engine.PYTHON), req(Action.START_SHADOW, Engine.KAFKA, actor="carol")).current
+    assert transition(started, req(Action.ABORT_SHADOW)).current.shadow_requested_by is None
 
 
 def test_cutover_requires_recorded_reconciliation():

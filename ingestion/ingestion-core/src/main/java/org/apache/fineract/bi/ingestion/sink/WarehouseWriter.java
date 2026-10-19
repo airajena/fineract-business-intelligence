@@ -39,7 +39,7 @@ import org.apache.fineract.bi.ingestion.contract.TableContract;
 import org.postgresql.PGConnection;
 import org.postgresql.copy.CopyManager;
 
-public final class WarehouseWriter {
+public final class WarehouseWriter implements BatchWriter {
 
     private static final String UPSERT_OFFSET =
             "INSERT INTO meta.consumer_offsets (consumer_group, topic, kafka_partition, next_offset, updated_at) "
@@ -61,6 +61,12 @@ public final class WarehouseWriter {
 
     public List<Applied> write(Connection c, Collection<RoutedEvent> events, Collection<PartitionOffset> offsets,
             String consumerGroup) throws SQLException {
+        return write(c, events, offsets, consumerGroup, List.of());
+    }
+
+    @Override
+    public List<Applied> write(Connection c, Collection<RoutedEvent> events, Collection<PartitionOffset> offsets,
+            String consumerGroup, Collection<SkipCheck> skips) throws SQLException {
         Map<String, List<RoutedEvent>> byTable = new TreeMap<>();
         for (RoutedEvent e : events) {
             byTable.computeIfAbsent(e.event().table(), k -> new ArrayList<>()).add(e);
@@ -68,6 +74,7 @@ public final class WarehouseWriter {
         List<Applied> applied = new ArrayList<>();
         c.setAutoCommit(false);
         try {
+            verifySkips(c, skips);
             CopyManager copy = c.unwrap(PGConnection.class).getCopyAPI();
             for (Map.Entry<String, List<RoutedEvent>> entry : byTable.entrySet()) {
                 TableContract table = contract.requireTable(entry.getKey());
@@ -110,6 +117,58 @@ public final class WarehouseWriter {
         } catch (RuntimeException e) {
             rollbackQuietly(c);
             throw e;
+        }
+    }
+
+    static void verifySkips(Connection c, Collection<SkipCheck> skips) throws SQLException {
+        if (skips == null || skips.isEmpty()) {
+            return;
+        }
+        Map<String, SkipCheck> distinct = new TreeMap<>();
+        for (SkipCheck s : skips) {
+            distinct.put(s.sourceId() + '\u0000' + s.table(), s);
+        }
+        String[] sources = new String[distinct.size()];
+        String[] tables = new String[distinct.size()];
+        Long[] epochs = new Long[distinct.size()];
+        int i = 0;
+        for (SkipCheck s : distinct.values()) {
+            sources[i] = s.sourceId();
+            tables[i] = s.table();
+            epochs[i] = s.epoch();
+            i++;
+        }
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT pg_advisory_xact_lock_shared(k) FROM (SELECT DISTINCT meta.ownership_lock_key(s, t) AS k "
+                        + "FROM unnest(?::text[], ?::text[]) AS x(s, t) ORDER BY k) q")) {
+            ps.setArray(1, c.createArrayOf("text", sources));
+            ps.setArray(2, c.createArrayOf("text", tables));
+            ps.execute();
+        }
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT x.s, x.t, x.e, o.epoch, (r.source_id IS NOT NULL) AS registered "
+                        + "FROM unnest(?::text[], ?::text[], ?::bigint[]) AS x(s, t, e) "
+                        + "LEFT JOIN meta.ingestion_ownership o ON o.source_id = x.s AND o.table_name = x.t "
+                        + "LEFT JOIN meta.source_registry r ON r.source_id = x.s")) {
+            ps.setArray(1, c.createArrayOf("text", sources));
+            ps.setArray(2, c.createArrayOf("text", tables));
+            ps.setArray(3, c.createArrayOf("bigint", epochs));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    long expected = rs.getLong(3);
+                    boolean stale;
+                    if (expected == SkipCheck.MUST_BE_UNREGISTERED) {
+                        stale = rs.getBoolean(5);
+                    } else {
+                        long actual = rs.getObject(4) == null ? 0L : rs.getLong(4);
+                        stale = actual != expected;
+                    }
+                    if (stale) {
+                        throw new SQLException("Skip decision for " + rs.getString(1) + "/" + rs.getString(2)
+                                + " is stale (ownership changed since the snapshot)", FencedWriteException.SQLSTATE);
+                    }
+                }
+            }
         }
     }
 

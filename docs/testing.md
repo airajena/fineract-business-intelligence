@@ -34,7 +34,7 @@ All commands target the repository root unless stated otherwise. Run them in a s
 | dbt model parse | `cd dbt && dbt deps && dbt parse --profiles-dir . --target local` | No |
 | dbt schema/data tests | `docker compose exec dbt dbt test` | Yes |
 | Integration tests (write path, feature flag, fencing, RLS) | `pytest tests/integration -v` | Yes (warehouse) |
-| Java tests and ASF license gate | `mvn -f ingestion/pom.xml verify` | No |
+| Java tests (including Kafka + PostgreSQL container tests) and ASF license gate | `mvn -f ingestion/pom.xml verify` | Docker for the container tests (skipped without it) |
 | Airflow DAG integrity | see section 9 | No (runs in the Airflow image) |
 | Python linter | `ruff check .` | No |
 | SQL linter | `sqlfluff lint dbt/models dbt/tests --exclude-rules structure.column_order,structure.join_condition_order,references.qualification` | No |
@@ -295,9 +295,9 @@ These suites cover the CDC engine, the control plane and the Airflow DAGs. The f
 
 | Suite | Command | Needs |
 |---|---|---|
-| Python unit (state machine, connectors, contract, Python engine) | `pytest tests/unit -v` | nothing |
+| Python unit (state machine, connectors, reconciler with a fake Connect, secrets, contract, Python engine) | `pytest tests/unit -v` | nothing |
 | Integration: write path, fencing, cutover, reconciliation, multi-bank RLS | `pytest tests/integration -v` | running `warehouse` |
-| Java unit tests and license gate | `mvn -f ingestion/pom.xml verify` | JDK 17, Maven |
+| Java unit tests (parser, converter, sink delivery paths with a mock consumer) and license gate | `mvn -f ingestion/pom.xml verify` | JDK 17, Maven. Tests that need the warehouse (`FBI_TEST_DB_URL`, default `jdbc:postgresql://localhost:5434/analytics`) are skipped when it is unreachable; CI runs them |
 | Airflow DAG integrity | see below | Airflow image |
 | Load and chaos harness | `loadtest/README.md` | `warehouse`, `kafka`, `sink` |
 

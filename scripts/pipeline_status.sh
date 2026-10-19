@@ -10,6 +10,9 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 set -uo pipefail
 export MSYS_NO_PATHCONV=1
@@ -43,7 +46,7 @@ show() {
         | head -25
 
     section "Debezium connectors (one per CDC source)"
-    if out="$(curl -sf "${CONNECT_URL}/connectors?expand=status")"; then
+    if out="$(curl -sf -u "${FBI_CONNECT_USER:-}:${FBI_CONNECT_PASSWORD:-}" "${CONNECT_URL}/connectors?expand=status")"; then
         printf '%s' "${out}" | python -c "
 import json, sys
 data = json.load(sys.stdin)

@@ -24,7 +24,9 @@ select
     id as client_id,
     account_no as client_account_no,
     external_id as client_external_id,
-    md5(source_id || '::' || tenant_id || '::' || id::text) as client_hash,
+    encode(
+        hmac(source_id || '::' || tenant_id || '::' || id::text, '{{ var("pii_hash_key") }}', 'sha256'), 'hex'
+    ) as client_hash,
     status_enum,
     activation_date,
     office_joining_date,

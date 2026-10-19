@@ -10,6 +10,9 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 set -euo pipefail
 
@@ -21,7 +24,7 @@ set -a; source .env; set +a
 COUNT="${1:-3}"
 CONTAINER="${SOURCE_DB_CONTAINER:-fineract-bi-fineract-db}"
 CDC_USER="${FINERACT_CDC_USER:-fbi_cdc}"
-CDC_PASSWORD="${FINERACT_CDC_PASSWORD:-fbi_cdc_dev_only}"
+CDC_PASSWORD="${FBI_SRC_DEMO_PASSWORD:-fbi_cdc_dev_only}"
 PUBLICATION="${FBI_DEBEZIUM_PUBLICATION_NAME:-fbi_cdc}"
 TABLES="$(python -c "import json; print(', '.join('public.' + t['table_name'] for t in json.load(open('contracts/fineract_tables.json'))['tables']))")"
 

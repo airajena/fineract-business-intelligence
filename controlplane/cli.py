@@ -9,6 +9,9 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 
 from __future__ import annotations
@@ -185,13 +188,11 @@ def cmd_connector_config(conn, args) -> dict:
 
 def cmd_reconcile_source(conn, args) -> dict:
     from controlplane import secrets
-    from controlplane.db import PgConfig
+    from controlplane.db import source_pg_config
 
     source = SourceRegistry(conn).get(args.source_id)
     conn.commit()
-    src = connect(PgConfig(source.db_host or "", source.db_port, source.db_name or "", source.db_user or "",
-                           secrets.resolve(source.secret_ref), source.labels.get("sslmode", "disable"),
-                           application_name="fbi-reconcile"))
+    src = connect(source_pg_config(source, secrets.resolve(source.secret_ref), "fbi-reconcile"))
     contract = load_contract()
     out = {}
     try:
@@ -216,9 +217,40 @@ def cmd_lifecycle(conn, args) -> dict:
 
 
 def cmd_retire_source(conn, args) -> dict:
+    from controlplane.connectors import CdcSettings
+    from controlplane.registry import RegistryError
     from controlplane.retire import retire_source
 
-    return retire_source(conn, args.source_id, forget=args.forget)
+    try:
+        SourceRegistry(conn).get(args.source_id)
+        registered = True
+    except RegistryError:
+        registered = False
+    conn.rollback()
+    if not registered and not args.allow_unregistered:
+        raise SystemExit(
+            f"{args.source_id} is not registered. Pass --allow-unregistered to purge leftover data of a removed source."
+        )
+    if not args.dry_run and OwnershipRepository(conn).dual_control_required():
+        if not args.approved_by:
+            raise SystemExit("retire-source purges data in every layer and needs --approved-by (dual control)")
+        if args.approved_by == args.actor:
+            raise SystemExit("--approved-by must differ from --actor")
+    return retire_source(
+        conn,
+        args.source_id,
+        forget=args.forget,
+        dry_run=args.dry_run,
+        settings=CdcSettings.from_env(),
+        actor=args.actor,
+        approved_by=args.approved_by,
+    )
+
+
+def cmd_approve_cutover(conn, args) -> dict:
+    tables = _tables(args.tables)
+    ids = OwnershipRepository(conn).approve_cutover(args.source_id, tables, args.label)
+    return {"source_id": args.source_id, "approvals_recorded": len(ids), "approved_by_db_login": "session_user"}
 
 
 def cmd_bump_generation(conn, args) -> dict:
@@ -326,8 +358,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Retire a source and purge everything derived from it (raw, shadow, facts, marts)",
     )
     rt.add_argument("--source-id", required=True)
-    rt.add_argument("--forget", action="store_true", help="Also delete the registry row (default keeps it RETIRED)")
+    rt.add_argument(
+        "--forget",
+        action="store_true",
+        help="Also delete the registry row once the replication slot is confirmed gone (default keeps it RETIRED)",
+    )
+    rt.add_argument("--dry-run", action="store_true", help="Show what would be purged and change nothing")
+    rt.add_argument("--approved-by", help="Second person approving the purge (required with dual control)")
+    rt.add_argument("--allow-unregistered", action="store_true", help="Purge leftover data of an unregistered id")
     rt.set_defaults(func=cmd_retire_source)
+
+    ap = sub.add_parser(
+        "approve-cutover",
+        help="Record a cutover approval under THIS database login (dual_control_mode=database)",
+    )
+    ap.add_argument("--source-id", required=True)
+    ap.add_argument("--tables", default="all")
+    ap.add_argument("--label", help="Free-text approver name for the audit trail")
+    ap.set_defaults(func=cmd_approve_cutover)
 
     bg = sub.add_parser("bump-generation", help="After a source restore/re-provision")
     bg.add_argument("--source-id", required=True)

@@ -122,5 +122,15 @@ sources:
         description: Business entities touched by each applied batch (loan, client, global, source).
       - name: source_registry
         description: Registered source databases and their lifecycle state.
+      - name: dbt_mart_cursor
+        description: >
+          One row per presentation mart: the last fact-build run whose dirty partitions that mart has
+          fully recomputed. Each mart advances only from its own successful build.
+      - name: dbt_mart_dirty
+        description: >
+          (source, office, product) partitions the fact build touched, with the earliest affected date,
+          written by the fact before it replaces rows so a partition that a loan left is recomputed too.
       - name: dbt_change_cursor
-        description: Last change_id fully processed by a successful dbt run.
+        description: >
+          Transaction-id watermark (last_txid) fully processed by a successful run of every
+          consumer model; change-log rows are read by transaction id, never by sequence order.

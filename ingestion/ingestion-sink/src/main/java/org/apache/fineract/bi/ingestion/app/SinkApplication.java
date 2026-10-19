@@ -96,13 +96,15 @@ public final class SinkApplication {
             List<SinkWorker> workers = new ArrayList<>();
             List<Thread> threads = new ArrayList<>();
             for (int i = 0; i < config.threads(); i++) {
-                SinkWorker w = new SinkWorker(i, config, ds, ownership, parser, writer, dlt, metrics, progress);
+                SinkWorker w = new SinkWorker(i, config, ds::getConnection, ownership, parser, writer, dlt,
+                        metrics, progress);
                 workers.add(w);
                 Thread t = new Thread(w);
                 threads.add(t);
                 t.start();
             }
-            metrics.serve(config.metricsPort(), () -> workers.stream().allMatch(SinkWorker::isAlive));
+            metrics.serve(config.metricsPort(),
+                    () -> workers.stream().allMatch(w -> w.isHealthy(System.currentTimeMillis())));
             LOG.info("Sink started: {} workers, group={}, pattern={}, batch={} events/{} ms",
                     config.threads(), config.groupId(), config.topicPattern(),
                     config.maxBatchEvents(), config.maxBatchWaitMs());

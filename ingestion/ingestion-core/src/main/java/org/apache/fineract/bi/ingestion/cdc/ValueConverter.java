@@ -21,15 +21,18 @@ package org.apache.fineract.bi.ingestion.cdc;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.time.Instant;
 import java.time.LocalDate;
+import org.apache.fineract.bi.ingestion.contract.ColumnSpec;
 
 public final class ValueConverter {
-
-    private static final long MICROS_THRESHOLD = 100_000_000_000_000L;
 
     private ValueConverter() {
     }
 
     public static String toPgText(JsonNode node, String type) throws PoisonEventException {
+        return toPgText(node, type, ColumnSpec.MICROS);
+    }
+
+    public static String toPgText(JsonNode node, String type, String cdcUnit) throws PoisonEventException {
         if (node == null || node.isNull() || node.isMissingNode()) {
             return null;
         }
@@ -43,9 +46,9 @@ public final class ValueConverter {
             case "timestamptz":
                 if (node.isIntegralNumber()) {
                     long v = node.asLong();
-                    Instant instant = Math.abs(v) >= MICROS_THRESHOLD
-                            ? Instant.ofEpochSecond(Math.floorDiv(v, 1_000_000L), Math.floorMod(v, 1_000_000L) * 1_000L)
-                            : Instant.ofEpochMilli(v);
+                    Instant instant = ColumnSpec.MILLIS.equals(cdcUnit)
+                            ? Instant.ofEpochMilli(v)
+                            : Instant.ofEpochSecond(Math.floorDiv(v, 1_000_000L), Math.floorMod(v, 1_000_000L) * 1_000L);
                     return instant.toString();
                 }
                 return node.asText();

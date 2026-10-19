@@ -27,12 +27,12 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: ${AIRFLOW_MAX_ACTIVE_TASKS_PER_DAG:-8}
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
-    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?AIRFLOW_FERNET_KEY must be set (see .env.example)}
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
     AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "${AIRFLOW_ADMIN_USERNAME:-admin}:admin"
     AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/passwords/simple_auth_manager_passwords.json
-    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-dev-only-change-me-airflow-jwt-secret}
-    AIRFLOW__API__SECRET_KEY: ${AIRFLOW_JWT_SECRET:-dev-only-change-me-airflow-jwt-secret}
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:?AIRFLOW_JWT_SECRET must be set (see .env.example)}
+    AIRFLOW__API__SECRET_KEY: ${AIRFLOW_JWT_SECRET:?AIRFLOW_JWT_SECRET must be set (see .env.example)}
     AIRFLOW__API__WORKERS: ${AIRFLOW_API_WORKERS:-1}
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${WAREHOUSE_ADMIN_USER}:${WAREHOUSE_ADMIN_PASSWORD}@warehouse:5432/airflow_metadata
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
@@ -43,6 +43,8 @@ x-airflow-common: &airflow-common
     WAREHOUSE_DB_NAME: ${WAREHOUSE_DB_NAME}
     WAREHOUSE_DB_USER: ${WAREHOUSE_LOADER_USER}
     WAREHOUSE_DB_PASSWORD: ${WAREHOUSE_LOADER_PASSWORD}
+    WAREHOUSE_ENGINE_USER: ${WAREHOUSE_ENGINE_USER:?WAREHOUSE_ENGINE_USER must be set (see .env.example)}
+    WAREHOUSE_ENGINE_PASSWORD: ${WAREHOUSE_ENGINE_PASSWORD:?WAREHOUSE_ENGINE_PASSWORD must be set (see .env.example)}
     PGHOST: warehouse
     PGPORT: "5432"
     PGDATABASE: ${WAREHOUSE_DB_NAME}
@@ -53,16 +55,22 @@ x-airflow-common: &airflow-common
     SOURCE_DB_PORT: ${SOURCE_DB_HOST_PORT:-5432}
     SOURCE_DB_NAME: ${SOURCE_DB_NAME}
     SOURCE_DB_USER: ${SOURCE_REPLICA_USER}
-    SOURCE_DB_PASSWORD: ${SOURCE_REPLICA_PASSWORD}
+    FBI_SRC_DEFAULT_PASSWORD: ${SOURCE_REPLICA_PASSWORD}
     SOURCE_DB_SCHEMA: ${SOURCE_DB_SCHEMA:-bi_connector_source}
-    SOURCE_DB_SECRET_REF: ${SOURCE_DB_SECRET_REF:-env:SOURCE_DB_PASSWORD}
+    SOURCE_DB_SECRET_REF: ${SOURCE_DB_SECRET_REF:-env:FBI_SRC_DEFAULT_PASSWORD}
     TENANT_ID: ${TENANT_ID:-default}
-    FINERACT_CDC_PASSWORD: ${FINERACT_CDC_PASSWORD:-}
+    FBI_SRC_DEMO_PASSWORD: ${FBI_SRC_DEMO_PASSWORD:-}
     COB_LOOKBACK_HOURS: ${COB_LOOKBACK_HOURS:-9999}
     COB_GATE_ENABLED: ${COB_GATE_ENABLED:-true}
     EXTRACT_PARALLELISM: ${EXTRACT_PARALLELISM:-4}
     EXTRACT_PAGE_SIZE: ${EXTRACT_PAGE_SIZE:-5000}
     FBI_CONNECT_CLUSTERS: ${FBI_CONNECT_CLUSTERS:-}
+    FBI_CONNECT_USER: ${FBI_CONNECT_USER:-}
+    FBI_CONNECT_PASSWORD: ${FBI_CONNECT_PASSWORD:-}
+    FBI_DEFAULT_SSLMODE: ${FBI_DEFAULT_SSLMODE:-verify-full}
+    FBI_EXCLUDE_PII: ${FBI_EXCLUDE_PII:-true}
+    FBI_PII_HASH_KEY: ${FBI_PII_HASH_KEY:?FBI_PII_HASH_KEY must be set (see .env.example)}
+    FBI_REQUIRE_AUTHENTICATED_ACTOR: ${FBI_REQUIRE_AUTHENTICATED_ACTOR:-false}
     FBI_KAFKA_BOOTSTRAP: kafka:9092
     FBI_RECONCILER_MAX_CREATES: ${FBI_RECONCILER_MAX_CREATES:-5}
     FBI_RECONCILER_MAX_DELETES: ${FBI_RECONCILER_MAX_DELETES:-10}
@@ -150,12 +158,16 @@ services:
       - autovacuum_analyze_scale_factor=0.02
       - -c
       - jit=off
+      - -c
+      - max_locks_per_transaction=256
     environment:
       POSTGRES_DB: ${WAREHOUSE_DB_NAME:?WAREHOUSE_DB_NAME must be set}
       POSTGRES_USER: ${WAREHOUSE_ADMIN_USER:?WAREHOUSE_ADMIN_USER must be set}
       POSTGRES_PASSWORD: ${WAREHOUSE_ADMIN_PASSWORD:?WAREHOUSE_ADMIN_PASSWORD must be set}
       WAREHOUSE_LOADER_USER: ${WAREHOUSE_LOADER_USER:?WAREHOUSE_LOADER_USER must be set}
       WAREHOUSE_LOADER_PASSWORD: ${WAREHOUSE_LOADER_PASSWORD:?WAREHOUSE_LOADER_PASSWORD must be set}
+      WAREHOUSE_ENGINE_USER: ${WAREHOUSE_ENGINE_USER:?WAREHOUSE_ENGINE_USER must be set}
+      WAREHOUSE_ENGINE_PASSWORD: ${WAREHOUSE_ENGINE_PASSWORD:?WAREHOUSE_ENGINE_PASSWORD must be set}
       WAREHOUSE_READER_USER: ${WAREHOUSE_READER_USER:?WAREHOUSE_READER_USER must be set}
       WAREHOUSE_READER_PASSWORD: ${WAREHOUSE_READER_PASSWORD:?WAREHOUSE_READER_PASSWORD must be set}
     ports:
@@ -187,13 +199,15 @@ services:
       SOURCE_DB_PORT: ${SOURCE_DB_HOST_PORT:-5432}
       SOURCE_DB_NAME: ${SOURCE_DB_NAME:?SOURCE_DB_NAME must be set}
       SOURCE_DB_USER: ${SOURCE_REPLICA_USER:?SOURCE_REPLICA_USER must be set}
-      SOURCE_DB_PASSWORD: ${SOURCE_REPLICA_PASSWORD:?SOURCE_REPLICA_PASSWORD must be set}
+      FBI_SRC_DEFAULT_PASSWORD: ${SOURCE_REPLICA_PASSWORD:?SOURCE_REPLICA_PASSWORD must be set}
       SOURCE_DB_SCHEMA: ${SOURCE_DB_SCHEMA:-public}
       WAREHOUSE_DB_HOST: warehouse
       WAREHOUSE_DB_PORT: "5432"
       WAREHOUSE_DB_NAME: ${WAREHOUSE_DB_NAME:?WAREHOUSE_DB_NAME must be set}
       WAREHOUSE_DB_USER: ${WAREHOUSE_LOADER_USER:?WAREHOUSE_LOADER_USER must be set}
       WAREHOUSE_DB_PASSWORD: ${WAREHOUSE_LOADER_PASSWORD:?WAREHOUSE_LOADER_PASSWORD must be set}
+      WAREHOUSE_ENGINE_USER: ${WAREHOUSE_ENGINE_USER:?WAREHOUSE_ENGINE_USER must be set}
+      WAREHOUSE_ENGINE_PASSWORD: ${WAREHOUSE_ENGINE_PASSWORD:?WAREHOUSE_ENGINE_PASSWORD must be set}
       WAREHOUSE_DB_SCHEMA: ${WAREHOUSE_DB_SCHEMA:-raw}
       TENANT_ID: ${TENANT_ID:-default}
       INGESTION_ENGINE_DEFAULT: ${INGESTION_ENGINE_DEFAULT:-PYTHON}
@@ -242,6 +256,7 @@ services:
       TENANT_ID: ${TENANT_ID:-default}
       DBT_PROFILES_DIR: /app/dbt
       DBT_THREADS: ${DBT_THREADS:-4}
+      FBI_PII_HASH_KEY: ${FBI_PII_HASH_KEY:?FBI_PII_HASH_KEY must be set (see .env.example)}
     volumes:
       - .:/app
     working_dir: /app/dbt
@@ -311,7 +326,7 @@ services:
       KAFKA_HEAP_OPTS: "-Xms${KAFKA_HEAP:-512m} -Xmx${KAFKA_HEAP:-512m}"
       KAFKA_LOG_DIRS: /var/lib/kafka/data
     ports:
-      - "29092:29092"
+      - "127.0.0.1:29092:29092"
     volumes:
       - kafka_data:/var/lib/kafka/data
     mem_limit: ${KAFKA_MEM_LIMIT:-1g}
@@ -360,11 +375,31 @@ services:
       CONNECT_CONFIG_PROVIDERS_ENV_CLASS: org.apache.kafka.common.config.provider.EnvVarConfigProvider
       CONNECT_CONFIG_PROVIDERS_FILE_CLASS: org.apache.kafka.common.config.provider.FileConfigProvider
       CONNECT_TOPIC_CREATION_ENABLE: "false"
-      CONNECT_CONNECTOR_CLIENT_CONFIG_OVERRIDE_POLICY: All
+      CONNECT_CONNECTOR_CLIENT_CONFIG_OVERRIDE_POLICY: None
+      CONNECT_CONFIG_PROVIDERS_ENV_PARAM_ALLOWLIST_PATTERN: ${CONNECT_ENV_ALLOWLIST:-FBI_SRC_[A-Za-z0-9_]+}
+      CONNECT_CONFIG_PROVIDERS_FILE_PARAM_ALLOWED_PATHS: ${CONNECT_FILE_ALLOWED_PATHS:-/run/secrets}
+      CONNECT_PRODUCER_COMPRESSION_TYPE: zstd
+      CONNECT_PRODUCER_LINGER_MS: "50"
+      CONNECT_PRODUCER_BATCH_SIZE: "262144"
+      CONNECT_PRODUCER_ACKS: all
+      CONNECT_PRODUCER_ENABLE_IDEMPOTENCE: "true"
       CONNECT_REST_ADVERTISED_HOST_NAME: ${CONNECT_ADVERTISED_HOST:-connect}
-      FINERACT_CDC_PASSWORD: ${FINERACT_CDC_PASSWORD:-}
+      CONNECT_REST_EXTENSION_CLASSES: org.apache.kafka.connect.rest.basic.auth.extension.BasicAuthSecurityRestExtension
+      KAFKA_OPTS: -Djava.security.auth.login.config=/tmp/connect-jaas.conf
+      FBI_CONNECT_USER: ${FBI_CONNECT_USER:?FBI_CONNECT_USER must be set (see .env.example)}
+      FBI_CONNECT_PASSWORD: ${FBI_CONNECT_PASSWORD:?FBI_CONNECT_PASSWORD must be set (see .env.example)}
+      FBI_SRC_DEMO_PASSWORD: ${FBI_SRC_DEMO_PASSWORD:-}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        umask 077
+        printf 'KafkaConnect {\n  org.apache.kafka.connect.rest.basic.auth.extension.PropertyFileLoginModule required file="/tmp/connect-rest.properties";\n};\n' > /tmp/connect-jaas.conf
+        printf '%s: %s\n' "$$FBI_CONNECT_USER" "$$FBI_CONNECT_PASSWORD" > /tmp/connect-rest.properties
+        exec /docker-entrypoint.sh start
     ports:
-      - "${CONNECT_HOST_PORT:-8083}:8083"
+      - "127.0.0.1:${CONNECT_HOST_PORT:-8083}:8083"
+    tmpfs:
+      - /run/secrets
     deploy:
       replicas: ${CONNECT_REPLICAS:-1}
     mem_limit: ${CONNECT_MEM_LIMIT:-1g}
@@ -375,7 +410,7 @@ services:
       - default
       - fineract_network
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8083/ >/dev/null"]
+      test: ["CMD-SHELL", "curl -sf -u \"$$FBI_CONNECT_USER:$$FBI_CONNECT_PASSWORD\" http://localhost:8083/ >/dev/null"]
       interval: 10s
       timeout: 5s
       retries: 18
@@ -393,8 +428,8 @@ services:
       SINK_MAX_BATCH_WAIT_MS: ${SINK_MAX_BATCH_WAIT_MS:-500}
       SINK_MAX_POLL_RECORDS: ${SINK_MAX_POLL_RECORDS:-5000}
       SINK_DB_URL: jdbc:postgresql://warehouse:5432/${WAREHOUSE_DB_NAME}
-      SINK_DB_USER: ${WAREHOUSE_LOADER_USER}
-      SINK_DB_PASSWORD: ${WAREHOUSE_LOADER_PASSWORD}
+      SINK_DB_USER: ${WAREHOUSE_ENGINE_USER:?WAREHOUSE_ENGINE_USER must be set}
+      SINK_DB_PASSWORD: ${WAREHOUSE_ENGINE_PASSWORD:?WAREHOUSE_ENGINE_PASSWORD must be set}
       SINK_OWNERSHIP_REFRESH_MS: ${SINK_OWNERSHIP_REFRESH_MS:-5000}
       SINK_UNKNOWN_SOURCE_POLICY: ${SINK_UNKNOWN_SOURCE_POLICY:-dlt}
       JAVA_OPTS: "-XX:MaxRAMPercentage=70 -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError"
@@ -446,7 +481,7 @@ services:
     environment:
       <<: *airflow-env
       AIRFLOW_ADMIN_USERNAME: ${AIRFLOW_ADMIN_USERNAME:-admin}
-      AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-admin_dev_only}
+      AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:?AIRFLOW_ADMIN_PASSWORD must be set (see .env.example)}
       FBI_POOL_SOURCE_EXTRACT: ${FBI_POOL_SOURCE_EXTRACT:-4}
       FBI_POOL_SOURCE_RECONCILE: ${FBI_POOL_SOURCE_RECONCILE:-2}
     restart: "no"
@@ -455,7 +490,7 @@ services:
     <<: *airflow-common
     command: api-server
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     mem_limit: ${AIRFLOW_API_MEM_LIMIT:-768m}
     depends_on:
       airflow-init:

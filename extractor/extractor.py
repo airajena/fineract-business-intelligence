@@ -29,7 +29,7 @@ import pg8000.dbapi
 
 from controlplane import secrets
 from controlplane.contract import Contract, TableContract, load_contract
-from controlplane.db import PgConfig, connect, quote_ident
+from controlplane.db import PgConfig, connect, quote_ident, source_pg_config, warehouse_config_from_env
 from controlplane.ownership import Action, CutoverState, Engine, Ownership, TransitionRequest
 from controlplane.ownership_repo import OwnershipRepository
 from controlplane.reconcile import source_vs_warehouse
@@ -118,30 +118,34 @@ def plan_assignments(
     return sorted(plan, key=lambda a: (a.table.table_name, a.target))
 
 
+def in_null_cursor_phase(table: TableContract, start: Watermark | None) -> bool:
+    return table.cursor_is_usable and (start is None or start.cursor_value is None)
+
+
 def build_page_query(
-    compat_schema: str, table: TableContract, start: Watermark | None, page_size: int
+    compat_schema: str,
+    table: TableContract,
+    start: Watermark | None,
+    page_size: int,
+    exclude_pii: bool = False,
 ) -> tuple[str, tuple]:
     pk = quote_ident(table.primary_key)
     select = []
     for c in table.columns:
-        if c.synthetic:
+        if c.synthetic or (exclude_pii and c.pii):
             select.append(f"CAST(NULL AS {c.type}) AS {quote_ident(c.name)}")
-        elif table.cursor_is_usable and c.name == table.python_cursor:
-            select.append(
-                f"COALESCE({quote_ident(c.name)}, TIMESTAMPTZ '1970-01-01 00:00:00+00') AS {quote_ident(c.name)}"
-            )
         else:
             select.append(quote_ident(c.name))
     base = f"SELECT {', '.join(select)} FROM {quote_ident(compat_schema)}.{quote_ident(table.table_name)}"
+    last_pk = start.last_pk if start and start.last_pk is not None else -(2**63)
     if table.cursor_is_usable:
-        cur = f"COALESCE({quote_ident(table.python_cursor)}, TIMESTAMPTZ '1970-01-01 00:00:00+00')"
-        cursor_value = start.cursor_value if start and start.cursor_value else _EPOCH
-        last_pk = start.last_pk if start and start.last_pk is not None else -(2**63)
+        cur = quote_ident(table.python_cursor)
+        if in_null_cursor_phase(table, start):
+            return f"{base} WHERE {cur} IS NULL AND {pk} > %s ORDER BY {pk} LIMIT %s", (last_pk, page_size)
         return (
             f"{base} WHERE ({cur}, {pk}) > (%s, %s) ORDER BY {cur}, {pk} LIMIT %s",
-            (cursor_value, last_pk, page_size),
+            (start.cursor_value, last_pk, page_size),
         )
-    last_pk = start.last_pk if start and start.last_pk is not None else -(2**63)
     return f"{base} WHERE {pk} > %s ORDER BY {pk} LIMIT %s", (last_pk, page_size)
 
 
@@ -193,16 +197,7 @@ class SourceExtractor:
         self.tables = tables
 
     def _source_conn(self):
-        s = self.source
-        cfg = PgConfig(
-            host=s.db_host or "localhost",
-            port=s.db_port,
-            database=s.db_name or "",
-            user=s.db_user or "",
-            password=secrets.resolve(s.secret_ref),
-            ssl_mode=s.labels.get("sslmode", "disable"),
-            application_name="fbi-python-engine",
-        )
+        cfg = source_pg_config(self.source, secrets.resolve(self.source.secret_ref), "fbi-python-engine")
         conn = pg8000.dbapi.connect(**cfg.connect_kwargs())
         conn.autocommit = True
         return conn
@@ -253,8 +248,23 @@ class SourceExtractor:
         finally:
             wh.close()
 
+    def _lock_key(self, a: Assignment) -> str:
+        return f"{self.source.source_id}:{a.table.table_name}:{a.target}"
+
     def _process(self, src, wh, watermarks: WatermarkManager, a: Assignment, mode: str) -> TableOutcome:
         out = TableOutcome(a.table.table_name, a.target)
+        cursor = wh.cursor()
+        cursor.execute("SELECT pg_advisory_lock(hashtextextended(%s, 11))", (self._lock_key(a),))
+        try:
+            return self._process_locked(src, wh, watermarks, a, mode, out)
+        finally:
+            wh.rollback()
+            wh.cursor().execute("SELECT pg_advisory_unlock(hashtextextended(%s, 11))", (self._lock_key(a),))
+            wh.commit()
+
+    def _process_locked(
+        self, src, wh, watermarks: WatermarkManager, a: Assignment, mode: str, out: TableOutcome
+    ) -> TableOutcome:
         try:
             if mode == "backfill":
                 watermarks.reset(a.table.table_name, a.target)
@@ -281,24 +291,32 @@ class SourceExtractor:
             start = None
         cursor_idx = t.column_names.index(t.python_cursor) if t.cursor_is_usable else None
         pk_idx = t.column_names.index(t.primary_key)
+        null_phase = in_null_cursor_phase(t, start)
         while True:
-            sql, params = build_page_query(self.source.compat_schema, t, start, self.settings.page_size)
+            sql, params = build_page_query(
+                self.source.compat_schema, t, start, self.settings.page_size, self.settings.exclude_pii
+            )
             cur = src.cursor()
             cur.execute(sql, params)
             rows = cur.fetchall()
-            if not rows:
-                break
-            last = rows[-1]
-            next_wm = Watermark(as_utc_datetime(last[cursor_idx]) if cursor_idx is not None else None, last[pk_idx])
-            applied, _ = self._write_page(wh, a, rows, cursor_idx, op="u")
-            if t.cursor_is_usable:
-                watermarks.update(t.table_name, a.target, next_wm.cursor_value, next_wm.last_pk)
-            wh.commit()
-            out.rows_read += len(rows)
-            out.rows_applied += applied
-            start = next_wm
+            if rows:
+                last = rows[-1]
+                cursor_value = None if null_phase or cursor_idx is None else as_utc_datetime(last[cursor_idx])
+                next_wm = Watermark(cursor_value, last[pk_idx])
+                applied, _ = self._write_page(wh, a, rows, cursor_idx, op="u")
+                if t.cursor_is_usable:
+                    watermarks.update(t.table_name, a.target, next_wm.cursor_value, next_wm.last_pk)
+                wh.commit()
+                out.rows_read += len(rows)
+                out.rows_applied += applied
+                start = next_wm
             if len(rows) < self.settings.page_size:
-                break
+                if not null_phase:
+                    break
+                null_phase = False
+                start = Watermark(_EPOCH, None)
+                watermarks.update(t.table_name, a.target, _EPOCH, None)
+                wh.commit()
         logger.info(
             "[%s] %s -> %s: read=%s applied=%s",
             self.source.source_id,
@@ -367,7 +385,7 @@ class SourceExtractor:
             keys_only=True,
             warehouse_schema="raw" if a.target == "prod" else "raw_shadow",
         )
-        missing = result.details.get("missing_in_source_keys", [])
+        missing = self._still_missing(src, t, result.details.get("missing_in_source_keys", []))
         if not missing:
             return
         pk_idx = t.column_names.index(t.primary_key)
@@ -388,6 +406,22 @@ class SourceExtractor:
             a.target,
             out.rows_deleted,
         )
+
+    def _still_missing(self, src, t: TableContract, keys: Sequence[int]) -> list[int]:
+        if not keys:
+            return []
+        present: set[int] = set()
+        pk = quote_ident(t.primary_key)
+        for i in range(0, len(keys), 5000):
+            chunk = list(keys[i : i + 5000])
+            cur = src.cursor()
+            cur.execute(
+                f"SELECT {pk} FROM {quote_ident(self.source.compat_schema)}.{quote_ident(t.table_name)} "
+                f"WHERE {pk} = ANY(%s)",
+                (chunk,),
+            )
+            present.update(int(r[0]) for r in cur.fetchall())
+        return [k for k in keys if int(k) not in present]
 
     def _ensure_cob_completed(self, src) -> None:
         cursor = src.cursor()
@@ -504,11 +538,15 @@ def run_sources(
     settings = settings or ExtractSettings.from_env()
     contract = load_contract()
     wh_cfg = warehouse_config()
+    boot = EnvSourceBootstrap.from_env()
+    if boot and (not source_ids or boot.source_id in source_ids) and (shard is None or shard[0] == 0):
+        control = connect(warehouse_config_from_env("fbi-python-engine-bootstrap"))
+        try:
+            ensure_env_source(control, boot, settings, contract)
+        finally:
+            control.close()
     conn = connect(wh_cfg)
     try:
-        boot = EnvSourceBootstrap.from_env()
-        if boot and (not source_ids or boot.source_id in source_ids) and (shard is None or shard[0] == 0):
-            ensure_env_source(conn, boot, settings, contract)
         registry = SourceRegistry(conn)
         if source_ids:
             sources = [registry.get(s) for s in source_ids]

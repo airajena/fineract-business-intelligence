@@ -24,17 +24,11 @@ where (m.source_id, m.snapshot_date) in (
 and (
     '{{ username }}' != ''
     and (
-        exists (
-            select 1
-            from meta.user_office_mapping uom
-            where uom.username = '{{ username }}'
-              and uom.role_name = 'ADMIN'
-        )
+        meta.is_admin_user('{{ username }}')
         or exists (
             select 1
-            from meta.v_user_access_scope scope
-            where scope.username = '{{ username }}'
-              and scope.source_id = m.source_id
+            from meta.user_scope('{{ username }}') scope
+            where scope.source_id = m.source_id
               and (scope.office_id is null or scope.office_id = m.office_id)
         )
     )

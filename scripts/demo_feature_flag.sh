@@ -10,6 +10,9 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 set -euo pipefail
 export MSYS_NO_PATHCONV=1
@@ -18,7 +21,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT}"
 set -a; source .env; set +a
 
-CDC_PW="${FINERACT_CDC_PASSWORD:-fbi_cdc_dev_only}"
+CDC_PW="${FBI_SRC_DEMO_PASSWORD:-fbi_cdc_dev_only}"
 SRC="${SOURCE_DB_CONTAINER:-fineract-bi-fineract-db}"
 WH="${WH_CONTAINER:-fineract-bi-warehouse}"
 SRC_ID="default"
@@ -29,8 +32,8 @@ src()  { docker exec -i -e PGPASSWORD="${SOURCE_BOOTSTRAP_PASSWORD}" "${SRC}" \
              psql -v ON_ERROR_STOP=1 -q -U "${SOURCE_BOOTSTRAP_USER}" -d "${SOURCE_DB_NAME}" -At -c "$1"; }
 
 ENVS=(-e SOURCE_DB_HOST="${SRC}" -e SOURCE_DB_PORT=5432 -e SOURCE_DB_NAME="${SOURCE_DB_NAME}"
-      -e SOURCE_DB_USER=fbi_cdc -e SOURCE_DB_PASSWORD="${CDC_PW}" -e SOURCE_DB_SECRET_REF=env:FINERACT_CDC_PASSWORD
-      -e FINERACT_CDC_PASSWORD="${CDC_PW}" -e SOURCE_DB_SCHEMA=bi_connector_source -e COB_LOOKBACK_HOURS=999999
+      -e SOURCE_DB_USER=fbi_cdc -e FBI_SRC_DEFAULT_PASSWORD="${CDC_PW}" -e SOURCE_DB_SECRET_REF=env:FBI_SRC_DEMO_PASSWORD
+      -e FBI_SRC_DEMO_PASSWORD="${CDC_PW}" -e SOURCE_DB_SCHEMA=bi_connector_source -e COB_LOOKBACK_HOURS=999999
       -e FBI_DEBEZIUM_PUBLICATION_MODE=disabled -e LOG_LEVEL=WARNING)
 run() { docker compose --profile python run --rm -T --no-deps "${ENVS[@]}" extractor "$@"; }
 cpc() { local actor="$1"; shift; run python -m controlplane.cli --actor "${actor}" "$@"; }

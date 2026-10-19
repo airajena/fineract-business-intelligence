@@ -9,6 +9,9 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 
 from __future__ import annotations
@@ -61,6 +64,7 @@ class Ownership:
     cutover_state: CutoverState
     epoch: int
     last_reconciliation_id: int | None = None
+    shadow_requested_by: str | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -71,6 +75,7 @@ class Ownership:
             "cutover_state": self.cutover_state.value,
             "epoch": self.epoch,
             "last_reconciliation_id": self.last_reconciliation_id,
+            "shadow_requested_by": self.shadow_requested_by,
         }
 
 
@@ -84,6 +89,8 @@ class TransitionRequest:
     reconciliation_passed: bool | None = None
     reconciliation_id: int | None = None
     require_dual_control: bool = True
+    reconciliation_valid: bool | None = None
+    database_enforced_approval: bool = False
 
 
 @dataclass(frozen=True)
@@ -123,7 +130,13 @@ def transition(current: Ownership, request: TransitionRequest) -> TransitionResu
         )
         _require(o.engine is not Engine.NONE, f"{where}: no production owner yet; use assign")
         _require(request.engine is not o.engine, f"{where}: {request.engine} already owns production")
-        nxt = _bump(o, shadow_engine=request.engine, cutover_state=CutoverState.SHADOWING, last_reconciliation_id=None)
+        nxt = _bump(
+            o,
+            shadow_engine=request.engine,
+            cutover_state=CutoverState.SHADOWING,
+            last_reconciliation_id=None,
+            shadow_requested_by=request.actor,
+        )
         return TransitionResult(o, nxt, (SideEffect.CLEAR_SHADOW,))
 
     if a is Action.BEGIN_RECONCILIATION:
@@ -146,15 +159,36 @@ def transition(current: Ownership, request: TransitionRequest) -> TransitionResu
         )
         _require(o.shadow_engine is not None, f"{where}: no shadow engine")
         _require(o.last_reconciliation_id is not None, f"{where}: no passing reconciliation recorded")
+        _require(
+            request.reconciliation_valid is True,
+            f"{where}: the recorded reconciliation is not a recent PASSED shadow_vs_prod run for this table",
+        )
         if request.require_dual_control:
             _require(bool(request.approved_by), f"{where}: cutover requires approved_by (dual control)")
-            _require(request.approved_by != request.actor, f"{where}: approver must differ from requester")
-        nxt = _bump(o, engine=o.shadow_engine, shadow_engine=None, cutover_state=CutoverState.STEADY)
+            if not request.database_enforced_approval:
+                _require(request.approved_by != request.actor, f"{where}: approver must differ from requester")
+                _require(
+                    request.approved_by != o.shadow_requested_by,
+                    f"{where}: approver must differ from whoever started the shadow ({o.shadow_requested_by})",
+                )
+        nxt = _bump(
+            o,
+            engine=o.shadow_engine,
+            shadow_engine=None,
+            cutover_state=CutoverState.STEADY,
+            shadow_requested_by=None,
+        )
         return TransitionResult(o, nxt, (SideEffect.PROMOTE_SHADOW,))
 
     if a is Action.ABORT_SHADOW:
         _require(o.shadow_engine is not None, f"{where}: no shadow to abort")
-        nxt = _bump(o, shadow_engine=None, cutover_state=CutoverState.STEADY, last_reconciliation_id=None)
+        nxt = _bump(
+            o,
+            shadow_engine=None,
+            cutover_state=CutoverState.STEADY,
+            last_reconciliation_id=None,
+            shadow_requested_by=None,
+        )
         return TransitionResult(o, nxt, (SideEffect.CLEAR_SHADOW,))
 
     if a is Action.PAUSE:

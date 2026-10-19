@@ -9,6 +9,9 @@
 --
 -- Unless required by applicable law or agreed to in writing, software
 -- distributed under the License is distributed on an "AS IS" BASIS,
+-- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-- See the License for the specific language governing permissions and
+-- limitations under the License.
 
 {{ config(
     materialized='table',
@@ -40,8 +43,8 @@ changes as (
     cross join change_window w
     where
         not w.full_rebuild
-        and c.change_id > w.last_change_id
-        and c.change_id <= w.max_change_id
+        and c.txid >= w.last_txid
+        and c.txid < w.horizon_txid
 ),
 
 fact_max as (
@@ -135,11 +138,6 @@ select
     tenant_id,
     loan_id,
     greatest(min(from_date), '{{ var("historical_start_date") }}'::date) as from_date,
-    case
-        when bool_or(not is_roll_forward)
-            then greatest(
-                min(from_date) filter (where not is_roll_forward), '{{ var("historical_start_date") }}'::date
-            )
-    end as changed_from
+    min(from_date) filter (where not is_roll_forward) as changed_from
 from scope_rows
 group by source_id, tenant_id, loan_id

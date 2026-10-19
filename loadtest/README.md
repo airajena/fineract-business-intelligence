@@ -29,7 +29,7 @@ warehouse against **ground truth**, not just message counts.
 | `loadgen verify` | Waits until, for every source and table, live rows, tombstones, the sum of winning positions and the sum of transaction amounts equal the ground truth; reports end-to-end latency percentiles. |
 | `loadgen source-workload` | Real transactions on Fineract-shaped PostgreSQL databases (repayments, loan updates, new loans with schedules, reversals, deletes) — exercises WAL → Debezium as well. |
 | `controlplane.cli reconcile-source` | Bucketed full-row checksum of a source database vs the warehouse. |
-| `verify_incremental_equivalence.sh` | Proves the incremental dbt build equals a full rebuild after backdated changes. |
+| `verify_incremental_equivalence.sh` | Proves the incremental dbt build equals a full rebuild after backdated changes, and that a partial build advances only the marts it built. |
 
 ## Laptop-safe procedure (≈ 4 GB of Docker memory)
 
@@ -52,16 +52,17 @@ Real Debezium path:
 
 ```bash
 scripts/bootstrap_cdc_sources.sh 3                 # fineract_src_001..003 + replication role + publication
-FINERACT_CDC_PASSWORD=fbi_cdc_dev_only docker compose --profile cdc up -d connect
+FBI_SRC_DEMO_PASSWORD=fbi_cdc_dev_only docker compose --profile cdc up -d connect
 python -m controlplane.cli register-source --source-id cdc-src-001 --tenant-id t1 \
     --host fineract-bi-fineract-db --db fineract_src_001 --user fbi_cdc \
-    --secret-ref env:FINERACT_CDC_PASSWORD --engine KAFKA            # repeat per database
-FBI_CONNECT_CLUSTERS='{"default":"http://localhost:8083"}' FBI_DEBEZIUM_PUBLICATION_MODE=disabled \
+    --secret-ref env:FBI_SRC_DEMO_PASSWORD --engine KAFKA            # repeat per database
+FBI_CONNECT_CLUSTERS='{"default":"http://localhost:8083"}' FBI_CONNECT_USER=fbi_connect FBI_CONNECT_PASSWORD=fbi_connect_dev_only \
+    FBI_DEBEZIUM_PUBLICATION_MODE=disabled \
     python -m controlplane.cli reconcile-connectors
 docker compose --profile loadtest run --rm loadgen source-workload --sources=3 \
     --jdbc-template=jdbc:postgresql://fineract-bi-fineract-db:5432/fineract_src_%03d \
     --db-user=root --db-password=... --seed-loans=200 --tps=100 --duration-sec=60
-docker compose --profile python run --rm --no-deps -e FINERACT_CDC_PASSWORD=fbi_cdc_dev_only extractor \
+docker compose --profile python run --rm --no-deps -e FBI_SRC_DEMO_PASSWORD=fbi_cdc_dev_only extractor \
     python -m controlplane.cli reconcile-source --source-id cdc-src-001 --bucket-size 1000
 ```
 

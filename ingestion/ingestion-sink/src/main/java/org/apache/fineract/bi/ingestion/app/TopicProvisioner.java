@@ -65,6 +65,7 @@ public final class TopicProvisioner {
         }
         plans.add(new Plan(contract.topicPrefix() + ".dlt", Math.max(1, Math.min(max > 0 ? max : 6, 6)), Map.of(
                 "retention.ms", env.string("TOPIC_DLT_RETENTION_MS", Long.toString(14L * 24 * 3600 * 1000)),
+                "max.message.bytes", env.string("TOPIC_MAX_MESSAGE_BYTES", "4194304"),
                 "min.insync.replicas", Integer.toString(minIsr))));
         plans.add(new Plan(contract.topicPrefix() + ".signals", 1, Map.of(
                 "min.insync.replicas", Integer.toString(minIsr))));

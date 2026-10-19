@@ -9,6 +9,9 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 
 from __future__ import annotations
@@ -62,13 +65,30 @@ def test_plan_assignments_can_be_limited_to_tables(contract):
 
 def test_keyset_page_query_is_bounded_and_resumable(contract):
     t = contract.table("m_loan_transaction")
-    sql, params = build_page_query("bi_connector_source", t, None, 5000)
-    assert 'FROM "bi_connector_source"."m_loan_transaction"' in sql
-    assert "LIMIT %s" in sql and params[-1] == 5000
-    assert '("last_modified_on_utc"' in sql.replace("COALESCE(", "(")
     resume = Watermark(datetime(2026, 1, 1, tzinfo=UTC), 77)
-    _, params = build_page_query("bi_connector_source", t, resume, 10)
+    sql, params = build_page_query("bi_connector_source", t, resume, 10)
+    assert 'FROM "bi_connector_source"."m_loan_transaction"' in sql
+    assert 'WHERE ("last_modified_on_utc", "id") > (%s, %s) ORDER BY "last_modified_on_utc", "id" LIMIT %s' in sql
+    assert "COALESCE" not in sql, "wrapping the cursor in a function would defeat an index on (cursor, pk)"
     assert params == (resume.cursor_value, 77, 10)
+
+
+def test_rows_with_a_null_cursor_are_read_in_their_own_pass_keyed_by_primary_key(contract):
+    t = contract.table("m_loan_transaction")
+    sql, params = build_page_query("bi_connector_source", t, None, 5000)
+    assert 'WHERE "last_modified_on_utc" IS NULL AND "id" > %s ORDER BY "id" LIMIT %s' in sql
+    assert "COALESCE" not in sql
+    assert params == (-(2**63), 5000)
+    sql, params = build_page_query("bi_connector_source", t, Watermark(None, 40), 5000)
+    assert "IS NULL" in sql and params == (40, 5000)
+
+
+def test_pii_columns_are_selected_as_null_when_excluded(contract):
+    t = contract.table("m_client")
+    sql, _ = build_page_query("bi_connector_source", t, Watermark(datetime(2026, 1, 1, tzinfo=UTC), 1), 10, True)
+    assert 'CAST(NULL AS date) AS "date_of_birth"' in sql
+    sql, _ = build_page_query("bi_connector_source", t, Watermark(datetime(2026, 1, 1, tzinfo=UTC), 1), 10, False)
+    assert 'CAST(NULL AS date) AS "date_of_birth"' not in sql and '"date_of_birth"' in sql
 
 
 def test_reference_tables_without_usable_cursor_page_by_primary_key(contract):
@@ -159,6 +179,119 @@ def test_extract_pages_until_short_page_and_advances_watermark(source_record, ex
     assert marks.updates == [(ts[1], 2), (ts[2], 3)]
     first_params = src_cursor.executed[0][1]
     assert first_params[0] == ts[0] - timedelta(seconds=600), "lookback window re-reads recent commits"
+
+
+def test_extract_reads_null_cursor_rows_first_then_switches_to_the_cursor_pass(
+    source_record, extract_settings, contract, monkeypatch
+):
+    t = contract.table("m_delinquency_bucket")
+    ts = datetime(2026, 1, 1, tzinfo=UTC)
+    src_cursor = FakeCursor(fetchall_results=[[(7, "no-cursor", None, None)], [(8, "b", ts, ts)]])
+    extractor = SourceExtractor(source_record, None, extract_settings, contract)
+    monkeypatch.setattr(extractor, "_write_page", lambda wh, a, rows, idx, op: (len(rows), 0))
+
+    class Marks:
+        def __init__(self):
+            self.updates = []
+
+        def get(self, table, target):
+            return None
+
+        def update(self, table, target, cursor_value, last_pk):
+            self.updates.append((cursor_value, last_pk))
+
+    marks = Marks()
+    out = TableOutcome("m_delinquency_bucket", "prod")
+    extractor._extract(FakeConnection(src_cursor), FakeConnection(), marks, Assignment(t, "prod", 1), out)
+    first, second = src_cursor.executed[0][0], src_cursor.executed[1][0]
+    assert "IS NULL" in first and "(%s, %s)" in second
+    assert out.rows_read == 2
+    assert marks.updates[0] == (None, 7)
+    assert marks.updates[-1] == (ts, 8)
+
+
+def test_tables_without_a_usable_cursor_page_by_primary_key_to_the_end(
+    source_record, extract_settings, contract, monkeypatch
+):
+    t = contract.table("m_office")
+    assert not t.cursor_is_usable
+    src_cursor = FakeCursor(fetchall_results=[[(1, None, ".1.", None, "HO", None, None, None)]])
+    extractor = SourceExtractor(source_record, None, extract_settings, contract)
+    pages = []
+    monkeypatch.setattr(extractor, "_write_page", lambda wh, a, rows, idx, op: pages.append(rows) or (len(rows), 0))
+    out = TableOutcome("m_office", "prod")
+
+    class Marks:
+        def get(self, table, target):
+            return None
+
+        def update(self, *args):
+            pytest.fail("tables without a cursor keep no watermark")
+
+    extractor._extract(FakeConnection(src_cursor), FakeConnection(), Marks(), Assignment(t, "prod", 1), out)
+    assert out.rows_read == 1 and len(pages) == 1
+    assert 'WHERE "id" > %s' in src_cursor.executed[0][0]
+
+
+class _Missing:
+    def __init__(self, keys):
+        self.details = {"missing_in_source_keys": keys}
+
+
+def test_delete_candidates_are_rechecked_against_the_source_before_being_soft_deleted(
+    source_record, extract_settings, contract, monkeypatch
+):
+    import extractor.extractor as engine
+
+    t = contract.table("m_loan_transaction")
+    monkeypatch.setattr(engine, "source_vs_warehouse", lambda *a, **k: _Missing([101, 102, 103]))
+    src = FakeConnection(FakeCursor(fetchall_results=[[(102,)]]))
+    extractor = SourceExtractor(source_record, None, extract_settings, contract)
+    staged = []
+    monkeypatch.setattr(
+        extractor,
+        "_write_page",
+        lambda wh, a, rows, idx, op: staged.append((op, [r[0] for r in rows])) or (0, len(rows)),
+    )
+    out = TableOutcome("m_loan_transaction", "prod")
+    extractor._reconcile_deletes(src, FakeConnection(), Assignment(t, "prod", 1), out)
+    assert staged == [("d", [101, 103])], "row 102 reappeared at the source, so it must not be deleted"
+    assert out.rows_deleted == 2
+
+
+def test_nothing_is_staged_when_every_delete_candidate_exists_again(source_record, extract_settings, contract,
+                                                                    monkeypatch):
+    import extractor.extractor as engine
+
+    t = contract.table("m_loan_transaction")
+    monkeypatch.setattr(engine, "source_vs_warehouse", lambda *a, **k: _Missing([5]))
+    extractor = SourceExtractor(source_record, None, extract_settings, contract)
+    monkeypatch.setattr(extractor, "_write_page", lambda *a, **k: pytest.fail("must not stage deletes"))
+    extractor._reconcile_deletes(
+        FakeConnection(FakeCursor(fetchall_results=[[(5,)]])), FakeConnection(), Assignment(t, "prod", 1),
+        TableOutcome("m_loan_transaction", "prod"),
+    )
+
+
+def test_a_table_is_processed_under_an_advisory_lock_that_is_always_released(
+    source_record, extract_settings, contract, monkeypatch
+):
+    extractor = SourceExtractor(source_record, None, extract_settings, contract)
+    cursor = FakeCursor()
+    wh = FakeConnection(cursor)
+    a = Assignment(contract.table("m_loan"), "prod", 1)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("source went away")
+
+    monkeypatch.setattr(extractor, "_process_locked", boom)
+    with pytest.raises(RuntimeError, match="went away"):
+        extractor._process(None, wh, None, a, "incremental")
+    statements = [sql for sql, _ in cursor.executed]
+    assert any("pg_advisory_lock(" in s for s in statements)
+    assert any("pg_advisory_unlock(" in s for s in statements)
+    lock_keys = {params for sql, params in cursor.executed if "advisory" in sql}
+    assert lock_keys == {("branch-001:m_loan:prod",)}
 
 
 @freeze_time("2026-08-02 12:00:00")

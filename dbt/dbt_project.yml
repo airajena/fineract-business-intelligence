@@ -41,6 +41,7 @@ seed-paths:
 
 vars:
   historical_start_date: "2025-01-01"
+  pii_hash_key: "{{ env_var('FBI_PII_HASH_KEY') }}"
   future_end_date: "2035-12-31"
   snapshot_daily_retention_days: null
   analyze_raw_on_run_start: true

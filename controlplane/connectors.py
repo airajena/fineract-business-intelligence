@@ -9,14 +9,19 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -24,12 +29,21 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from controlplane.contract import Contract
+from controlplane.db import default_source_sslmode
 from controlplane.registry import SourceRecord, source_id_from_connector
 from controlplane.secrets import connect_placeholder
 
 log = logging.getLogger(__name__)
 
 MANAGED_PREFIX = "fbi-src-"
+
+_QUALIFIED_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}(\.[A-Za-z_][A-Za-z0-9_]{0,62})?$")
+
+
+def _identifier(value: str, what: str) -> str:
+    if not _QUALIFIED_IDENTIFIER.match(value):
+        raise ValueError(f"{what} {value!r} is not a valid (optionally schema-qualified) identifier")
+    return value
 
 
 @dataclass(frozen=True)
@@ -49,6 +63,9 @@ class CdcSettings:
     max_deletes_per_run: int = 10
     delete_orphans: bool = True
     drop_stale_slots: bool = True
+    exclude_pii: bool = True
+    connect_user: str = ""
+    connect_password: str = ""
     overrides: dict[str, str] = field(default_factory=dict)
 
     @classmethod
@@ -69,6 +86,9 @@ class CdcSettings:
             max_deletes_per_run=int(os.getenv("FBI_RECONCILER_MAX_DELETES", "10")),
             delete_orphans=os.getenv("FBI_RECONCILER_DELETE_ORPHANS", "true").lower() == "true",
             drop_stale_slots=os.getenv("FBI_RECONCILER_DROP_STALE_SLOTS", "true").lower() == "true",
+            exclude_pii=os.getenv("FBI_EXCLUDE_PII", "true").lower() == "true",
+            connect_user=os.getenv("FBI_CONNECT_USER", ""),
+            connect_password=os.getenv("FBI_CONNECT_PASSWORD", ""),
             overrides=json.loads(os.getenv("FBI_CONNECTOR_OVERRIDES") or "{}"),
         )
 
@@ -83,7 +103,7 @@ def build_connector_config(source: SourceRecord, contract: Contract, settings: C
             f"{schema}.{t.table_name}.{candidate}"
             for t in contract.tables
             for c in t.columns
-            if not c.synthetic
+            if not c.synthetic and not (settings.exclude_pii and c.pii)
             for candidate in c.cdc_candidates
         }
     )
@@ -95,7 +115,7 @@ def build_connector_config(source: SourceRecord, contract: Contract, settings: C
         "database.user": source.db_user,
         "database.password": connect_placeholder(source.secret_ref),
         "database.dbname": source.db_name,
-        "database.sslmode": source.labels.get("sslmode", "prefer"),
+        "database.sslmode": source.labels.get("sslmode") or default_source_sslmode(),
         "topic.prefix": source.source_id,
         "plugin.name": "pgoutput",
         "slot.name": source.slot_name,
@@ -128,22 +148,17 @@ def build_connector_config(source: SourceRecord, contract: Contract, settings: C
         "transforms.heartbeat.type": "org.apache.kafka.connect.transforms.RegexRouter",
         "transforms.heartbeat.regex": r"__debezium-heartbeat\..*",
         "transforms.heartbeat.replacement": f"{contract.topic_prefix}.heartbeats",
-        "producer.override.compression.type": "zstd",
-        "producer.override.linger.ms": "50",
-        "producer.override.batch.size": "262144",
-        "producer.override.acks": "all",
-        "producer.override.enable.idempotence": "true",
         "errors.retry.timeout": "-1",
         "errors.tolerance": "none",
     }
     if source.labels.get("heartbeat_table"):
+        heartbeat_table = _identifier(source.labels["heartbeat_table"], "heartbeat_table")
         config["heartbeat.action.query"] = (
-            f"INSERT INTO {source.labels['heartbeat_table']} (id, ts) VALUES (1, NOW()) "
-            "ON CONFLICT (id) DO UPDATE SET ts = EXCLUDED.ts"
+            f"INSERT INTO {heartbeat_table} (id, ts) VALUES (1, NOW()) ON CONFLICT (id) DO UPDATE SET ts = EXCLUDED.ts"
         )
     if source.labels.get("signal_table"):
         config["signal.enabled.channels"] = "source,kafka"
-        config["signal.data.collection"] = source.labels["signal_table"]
+        config["signal.data.collection"] = _identifier(source.labels["signal_table"], "signal_table")
     config.update({k: str(v) for k, v in settings.overrides.items()})
     return config
 
@@ -192,6 +207,7 @@ def plan_actions(
     desired: list[DesiredConnector],
     observed: dict[str, dict[str, ObservedConnector]],
     settings: CdcSettings,
+    protected: frozenset[str] = frozenset(),
 ) -> tuple[list[ConnectorAction], list[str]]:
     actions: list[ConnectorAction] = []
     deferred: list[str] = []
@@ -211,7 +227,8 @@ def plan_actions(
                 actions.append(ConnectorAction(ActionKind.PAUSE, d.name, d.cluster, d.source_id))
             continue
         drift = {k: v for k, v in d.config.items() if obs.config.get(k) != v}
-        if drift:
+        stale = set(obs.config) - set(d.config) - {"name"}
+        if drift or stale:
             actions.append(ConnectorAction(ActionKind.UPDATE, d.name, d.cluster, d.source_id, d.config))
         if d.paused and obs.state != "PAUSED":
             actions.append(ConnectorAction(ActionKind.PAUSE, d.name, d.cluster, d.source_id))
@@ -223,7 +240,11 @@ def plan_actions(
     if settings.delete_orphans:
         for cluster, conns in sorted(observed.items()):
             for name in sorted(conns):
-                if not name.startswith(MANAGED_PREFIX) or name in desired_by_cluster.get(cluster, set()):
+                if (
+                    not name.startswith(MANAGED_PREFIX)
+                    or name in desired_by_cluster.get(cluster, set())
+                    or name in protected
+                ):
                     continue
                 if deletes >= settings.max_deletes_per_run:
                     deferred.append(name)
@@ -235,17 +256,23 @@ def plan_actions(
 
 class ConnectClient:
 
-    def __init__(self, base_url: str, timeout: float = 30.0) -> None:
+    def __init__(self, base_url: str, timeout: float = 30.0, user: str = "", password: str = "") -> None:
         self._base = base_url.rstrip("/")
         self._timeout = timeout
+        self._auth = (
+            "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode() if user or password else None
+        )
 
     def _request(self, method: str, path: str, body: dict | None = None) -> object:
         data = json.dumps(body).encode() if body is not None else None
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if self._auth:
+            headers["Authorization"] = self._auth
         req = urllib.request.Request(
             self._base + path,
             data=data,
             method=method,
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            headers=headers,
         )
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:  # noqa: S310
@@ -269,6 +296,22 @@ class ConnectClient:
                 trace=next((t.get("trace") for t in tasks if t.get("trace")), None),
             )
         return result
+
+    def list_names(self) -> list[str]:
+        return sorted(self._request("GET", "/connectors") or [])
+
+    def describe(self, name: str) -> ObservedConnector:
+        quoted = urllib.parse.quote(name)
+        info = self._request("GET", f"/connectors/{quoted}") or {}
+        status = self._request("GET", f"/connectors/{quoted}/status") or {}
+        tasks = status.get("tasks", [])
+        return ObservedConnector(
+            name=name,
+            config=info.get("config", {}),
+            state=status.get("connector", {}).get("state", "UNKNOWN"),
+            task_states=tuple(t.get("state", "UNKNOWN") for t in tasks),
+            trace=next((t.get("trace") for t in tasks if t.get("trace")), None),
+        )
 
     def put_config(self, name: str, config: dict[str, str]) -> None:
         self._request("PUT", f"/connectors/{urllib.parse.quote(name)}/config", config)

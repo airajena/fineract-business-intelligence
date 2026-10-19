@@ -71,6 +71,42 @@ public class DebeziumEnvelopeParserTest {
     }
 
     @Test
+    public void aColumnMissingFromTheRowImageIsTreatedAsUnavailableNotAsNull() throws Exception {
+        String env = "{\"after\":{\"id\":7,\"loan_id\":3},"
+                + "\"source\":{\"name\":\"s1\",\"table\":\"m_loan_transaction\",\"lsn\":9},\"op\":\"u\"}";
+        ChangeEvent e = parser.parse("fineract.cdc.m_loan_transaction", json(env)).orElseThrow();
+        assertThat(e.unavailable()).contains("amount", "transaction_date", "is_reversed");
+        assertThat(e.absent()).contains("amount", "transaction_date");
+        assertThat(e.unavailable()).doesNotContain("id", "loan_id");
+        assertThat(value(e, "m_loan_transaction", "amount")).isNull();
+    }
+
+    @Test
+    public void anExplicitJsonNullIsStillANullValueNotAnAbsentColumn() throws Exception {
+        String env = "{\"after\":{\"id\":7,\"loan_id\":3,\"amount\":null},"
+                + "\"source\":{\"name\":\"s1\",\"table\":\"m_loan_transaction\",\"lsn\":9},\"op\":\"u\"}";
+        ChangeEvent e = parser.parse("fineract.cdc.m_loan_transaction", json(env)).orElseThrow();
+        assertThat(e.unavailable()).doesNotContain("amount");
+        assertThat(e.absent()).doesNotContain("amount");
+    }
+
+    @Test
+    public void absentColumnsOfADeleteAreNotReported() throws Exception {
+        String env = "{\"before\":{\"id\":42},\"after\":null,\"source\":{\"name\":\"s1\",\"table\":\"m_loan\",\"lsn\":5},"
+                + "\"op\":\"d\"}";
+        ChangeEvent e = parser.parse("fineract.cdc.m_loan", json(env)).orElseThrow();
+        assertThat(e.absent()).isEmpty();
+    }
+
+    @Test
+    public void piiColumnsExcludedFromTheCaptureAreNeverWrittenAsNull() throws Exception {
+        String env = "{\"after\":{\"id\":5,\"account_no\":\"C5\",\"office_id\":101},"
+                + "\"source\":{\"name\":\"s1\",\"table\":\"m_client\",\"lsn\":9},\"op\":\"u\"}";
+        ChangeEvent e = parser.parse("fineract.cdc.m_client", json(env)).orElseThrow();
+        assertThat(e.unavailable()).contains("date_of_birth");
+    }
+
+    @Test
     public void deleteUsesBeforeImage() throws Exception {
         String env = "{\"before\":{\"id\":42},\"after\":null,\"source\":{\"name\":\"s1\",\"table\":\"m_loan\",\"lsn\":5},"
                 + "\"op\":\"d\"}";
@@ -107,7 +143,8 @@ public class DebeziumEnvelopeParserTest {
         String env = "{\"after\":{\"id\":1,\"description\":\"__debezium_unavailable_value\",\"name\":\"P\"},"
                 + "\"source\":{\"name\":\"s1\",\"table\":\"m_product_loan\",\"lsn\":1},\"op\":\"u\"}";
         ChangeEvent e = parser.parse("fineract.cdc.m_product_loan", json(env)).orElseThrow();
-        assertThat(e.unavailable()).containsExactly("description");
+        assertThat(e.unavailable()).contains("description");
+        assertThat(e.absent()).doesNotContain("description", "name");
         assertThat(value(e, "m_product_loan", "description")).isNull();
     }
 

@@ -9,12 +9,16 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 
 from controlplane.contract import TableContract
@@ -137,16 +141,22 @@ def _source_columns(source_conn, schema: str, table: str) -> set[str]:
     return {r[0] for r in cursor.fetchall()}
 
 
+def comparable_columns(contract: TableContract) -> tuple:
+    exclude = os.getenv("FBI_EXCLUDE_PII", "true").strip().lower() in ("1", "true", "yes", "on")
+    return tuple(c for c in contract.business_columns if not (exclude and c.pii))
+
+
 def source_row_expression(contract: TableContract, available: set[str]) -> str:
     parts = []
-    for c in contract.business_columns:
+    for c in comparable_columns(contract):
         src = next((cand for cand in c.cdc_candidates if cand in available), None)
         parts.append(f"CAST({quote_ident(src)} AS {c.type})" if src else f"CAST(NULL AS {c.type})")
     return "ROW(" + ", ".join(parts) + ")::text"
 
 
 def warehouse_row_expression(contract: TableContract) -> str:
-    return "ROW(" + ", ".join(f"CAST({quote_ident(c.name)} AS {c.type})" for c in contract.business_columns) + ")::text"
+    parts = [f"CAST({quote_ident(c.name)} AS {c.type})" for c in comparable_columns(contract)]
+    return "ROW(" + ", ".join(parts) + ")::text"
 
 
 def _bucket_aggregates(conn, sql: str, params: tuple) -> dict[int, tuple[int, int]]:

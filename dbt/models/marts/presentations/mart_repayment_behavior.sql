@@ -13,29 +13,19 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 
--- depends_on: {{ ref('int_snapshot_scope') }}
+-- depends_on: {{ ref('int_change_window') }}
+-- depends_on: {{ ref('fact_loan_snapshot') }}
 {{
     config(
         materialized='incremental',
         incremental_strategy='append',
         on_schema_change='append_new_columns',
         indexes=[{'columns': ['source_id', 'reporting_date']}, {'columns': ['reporting_date']}],
-        pre_hook=["{{ heavy_model_settings() }}", "{{ mart_delete_recompute_window('reporting_date', 'changed_from') }}"]
+        pre_hook=["{{ heavy_model_settings() }}", "{{ mart_delete_recompute_window('mart_repayment_behavior', 'reporting_date', 'changed_from') }}"]
     )
 }}
 
-with recompute as (
-    {% if is_incremental() %}
-        {{ mart_recompute_window('reporting_date', 'changed_from') }}
-    {% else %}
-        select distinct
-            source_id,
-            date '1900-01-01' as recompute_from
-        from {{ ref('stg_m_loan') }}
-    {% endif %}
-),
-
-loan_dimensions as (
+with loan_dimensions as (
     select
         l.source_id,
         l.tenant_id,
@@ -51,6 +41,19 @@ loan_dimensions as (
             l.source_id = c.source_id
             and l.tenant_id = c.tenant_id
             and l.client_id = c.client_id
+),
+
+recompute as (
+    {% if is_incremental() %}
+        {{ mart_recompute_window('mart_repayment_behavior', 'changed_from') }}
+    {% else %}
+        select distinct
+            source_id,
+            office_id,
+            product_id,
+            date '1900-01-01' as recompute_from
+        from loan_dimensions
+    {% endif %}
 ),
 
 transactions as (
@@ -81,6 +84,8 @@ transactions as (
     inner join recompute as w
         on
             t.source_id = w.source_id
+            and ld.office_id is not distinct from w.office_id
+            and ld.product_id is not distinct from w.product_id
             and t.transaction_date >= w.recompute_from
     where t.is_reversed = false
 ),

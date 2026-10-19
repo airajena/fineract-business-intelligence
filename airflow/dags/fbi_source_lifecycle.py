@@ -9,15 +9,30 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta
 
 from airflow.sdk import Param, dag, get_current_context, task
 
 DEFAULT_ARGS = {"owner": "fbi-platform", "retries": 0}
+
+
+def authenticated_actor(context, requested: str) -> str:
+    user = getattr(context.get("dag_run"), "triggering_user_name", None)
+    if user:
+        return str(user)
+    if os.getenv("FBI_REQUIRE_AUTHENTICATED_ACTOR", "false").lower() == "true":
+        raise RuntimeError("No authenticated triggering user on this run; refusing to trust requested_by")
+    return requested
+
+
 ACTIONS = ["start_shadow", "cutover_gate", "cutover", "abort_shadow", "pause", "resume", "assign", "force_assign"]
 
 
@@ -37,7 +52,7 @@ ACTIONS = ["start_shadow", "cutover_gate", "cutover", "abort_shadow", "pause", "
         "db_port": Param(5432, type="integer"),
         "db_name": Param("", type="string"),
         "db_user": Param("", type="string"),
-        "secret_ref": Param("env:FINERACT_CDC_PASSWORD", type="string", pattern="^(env|file|vault):"),
+        "secret_ref": Param("env:FBI_SRC_DEMO_PASSWORD", type="string", pattern="^(env|file):"),
         "compat_schema": Param("bi_connector_source", type="string"),
         "connect_cluster": Param("default", type="string"),
         "engine": Param("PYTHON", enum=["PYTHON", "KAFKA"]),
@@ -50,8 +65,9 @@ def fbi_source_onboarding():
     def onboard() -> dict:
         from controlplane.tasks import onboard_source
 
-        p = dict(get_current_context()["params"])
-        return onboard_source(p, actor=p["requested_by"])
+        context = get_current_context()
+        p = dict(context["params"])
+        return onboard_source(p, actor=authenticated_actor(context, p["requested_by"]))
 
     @task
     def provision_connector(result: dict) -> dict:
@@ -90,14 +106,16 @@ def fbi_ingestion_feature_flag():
     def execute() -> dict:
         from controlplane import tasks
 
-        p = get_current_context()["params"]
+        context = get_current_context()
+        p = context["params"]
         action = p["action"]
+        actor = authenticated_actor(context, p["requested_by"])
         if action == "cutover_gate":
             return {"action": action, "gate": tasks.cutover_gate(
-                p["source_id"], p["tables"], p["requested_by"], int(p["settle_seconds"]), int(p["max_discrepancies"]))}
+                p["source_id"], p["tables"], actor, int(p["settle_seconds"]), int(p["max_discrepancies"]))}
         engine = p["target_engine"] if action in ("start_shadow", "assign", "force_assign") else None
         changes = tasks.apply_ownership_action(
-            p["source_id"], p["tables"], action, p["requested_by"], p["reason"],
+            p["source_id"], p["tables"], action, actor, p["reason"],
             engine=engine, approved_by=p["approved_by"] or None,
         )
         return {"action": action, "engine": engine, "changes": changes}

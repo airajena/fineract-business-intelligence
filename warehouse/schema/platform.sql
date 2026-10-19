@@ -9,6 +9,9 @@
 --
 -- Unless required by applicable law or agreed to in writing, software
 -- distributed under the License is distributed on an "AS IS" BASIS,
+-- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-- See the License for the specific language governing permissions and
+-- limitations under the License.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
@@ -34,12 +37,21 @@ VALUES
      'Hash partitions per raw table, keyed by source_id. Changing requires a re-partition migration.'),
     ('raw_fillfactor', '85', FALSE,
      'Fillfactor for new raw partitions; below 100 keeps HOT updates for frequently updated rows.'),
-    ('ownership_lock_buckets', '64', TRUE,
-     'Advisory-lock buckets per table used to fence writers against ownership transitions.'),
     ('require_dual_control', 'true', FALSE,
      'When true a cutover must be approved by a different actor than the requester.'),
+    ('dual_control_mode', 'parameter', FALSE,
+     'parameter: approver is a CLI/DAG parameter (development). database: the approver must be a different '
+     'database login that recorded the approval through meta.approve_cutover().'),
+    ('reconciliation_max_age_minutes', '120', FALSE,
+     'A cutover needs a PASSED shadow_vs_prod reconciliation for the same source and table newer than this.'),
     ('change_log_retention_days', '14', FALSE,
-     'Consumed entity_change_log rows older than this are purged by maintenance.')
+     'Consumed entity_change_log partitions older than this are dropped by maintenance.'),
+    ('cursor_stale_days', '7', FALSE,
+     'A dbt change cursor that has not moved for this long no longer pins change-log retention.'),
+    ('progress_retention_days', '7', FALSE,
+     'ingestion_progress and ingestion_audit rows older than this are purged by maintenance.'),
+    ('ownership_audit_retention_days', '730', FALSE,
+     'ingestion_ownership_audit rows older than this are purged by meta.purge_ownership_audit().')
 ON CONFLICT (setting_key) DO NOTHING;
 
 CREATE OR REPLACE FUNCTION meta.setting(p_key TEXT, p_default TEXT DEFAULT NULL)
@@ -62,6 +74,8 @@ CREATE TABLE IF NOT EXISTS meta.table_contract (
     contract_version INTEGER NOT NULL,
     loaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE meta.table_contract ADD COLUMN IF NOT EXISTS change_history_columns JSONB;
 
 CREATE OR REPLACE FUNCTION meta.assert_identifier(p_value TEXT)
 RETURNS TEXT
@@ -96,6 +110,16 @@ BEGIN
                     col ->> 'type', t ->> 'table_name', col ->> 'name' USING ERRCODE = '22023';
             END IF;
         END LOOP;
+        IF t -> 'change_tracking' -> 'history_columns' IS NOT NULL THEN
+            FOR col IN SELECT value FROM jsonb_array_elements(t -> 'change_tracking' -> 'history_columns') LOOP
+                PERFORM meta.assert_identifier(col #>> '{}');
+                IF NOT EXISTS (
+                    SELECT 1 FROM jsonb_array_elements(t -> 'columns') c WHERE c ->> 'name' = col #>> '{}'
+                ) THEN
+                    RAISE EXCEPTION 'History column % is not a column of %', col #>> '{}', t ->> 'table_name';
+                END IF;
+            END LOOP;
+        END IF;
         IF NOT EXISTS (
             SELECT 1 FROM jsonb_array_elements(t -> 'columns') c WHERE c ->> 'name' = t ->> 'primary_key'
         ) THEN
@@ -104,7 +128,7 @@ BEGIN
 
         INSERT INTO meta.table_contract (
             table_name, raw_table, primary_key, columns, indexes,
-            change_entity, change_key, change_date, contract_version
+            change_entity, change_key, change_date, change_history_columns, contract_version
         )
         VALUES (
             t ->> 'table_name',
@@ -116,6 +140,7 @@ BEGIN
             meta.assert_identifier(COALESCE(t -> 'change_tracking' ->> 'key', 'id')),
             CASE WHEN t -> 'change_tracking' ->> 'date' IS NULL THEN NULL
                  ELSE meta.assert_identifier(t -> 'change_tracking' ->> 'date') END,
+            t -> 'change_tracking' -> 'history_columns',
             (p_contract ->> 'contract_version')::INTEGER
         )
         ON CONFLICT (table_name) DO UPDATE
@@ -126,6 +151,7 @@ BEGIN
             change_entity = EXCLUDED.change_entity,
             change_key = EXCLUDED.change_key,
             change_date = EXCLUDED.change_date,
+            change_history_columns = EXCLUDED.change_history_columns,
             contract_version = EXCLUDED.contract_version,
             loaded_at = NOW();
         n := n + 1;
@@ -219,8 +245,12 @@ CREATE TABLE IF NOT EXISTS meta.source_registry (
     labels JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT secret_ref_is_reference CHECK (secret_ref IS NULL OR secret_ref ~ '^(env|file|vault):')
+    CONSTRAINT secret_ref_is_reference CHECK (secret_ref IS NULL OR secret_ref ~ '^(env|file):')
 );
+
+ALTER TABLE meta.source_registry DROP CONSTRAINT IF EXISTS secret_ref_is_reference;
+ALTER TABLE meta.source_registry ADD CONSTRAINT secret_ref_is_reference
+    CHECK (secret_ref IS NULL OR secret_ref ~ '^(env|file):') NOT VALID;
 
 CREATE INDEX IF NOT EXISTS ix_source_registry_region ON meta.source_registry (region, lifecycle_state);
 
@@ -251,6 +281,9 @@ CREATE TABLE IF NOT EXISTS meta.ingestion_ownership (
     )
 );
 
+ALTER TABLE meta.ingestion_ownership ADD COLUMN IF NOT EXISTS shadow_requested_by TEXT;
+ALTER TABLE meta.ingestion_ownership ADD COLUMN IF NOT EXISTS shadow_requested_db_user TEXT;
+
 CREATE INDEX IF NOT EXISTS ix_ingestion_ownership_engine ON meta.ingestion_ownership (engine, shadow_engine);
 
 CREATE TABLE IF NOT EXISTS meta.ingestion_ownership_audit (
@@ -266,19 +299,134 @@ CREATE TABLE IF NOT EXISTS meta.ingestion_ownership_audit (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE meta.ingestion_ownership_audit ADD COLUMN IF NOT EXISTS db_user TEXT NOT NULL DEFAULT session_user;
+
 CREATE INDEX IF NOT EXISTS ix_ownership_audit_source ON meta.ingestion_ownership_audit (source_id, created_at);
+
+CREATE OR REPLACE FUNCTION meta.protect_ownership_audit()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF COALESCE(current_setting('fbi.audit_maintenance', TRUE), '') = 'on' THEN
+        RETURN CASE TG_OP WHEN 'DELETE' THEN OLD ELSE NEW END;
+    END IF;
+    RAISE EXCEPTION 'meta.ingestion_ownership_audit is append-only (% rejected)', TG_OP USING ERRCODE = 'FBI03';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_ownership_audit_append_only ON meta.ingestion_ownership_audit;
+CREATE TRIGGER trg_ownership_audit_append_only
+    BEFORE UPDATE OR DELETE ON meta.ingestion_ownership_audit
+    FOR EACH ROW EXECUTE FUNCTION meta.protect_ownership_audit();
+
+CREATE TABLE IF NOT EXISTS meta.cutover_approval (
+    approval_id BIGSERIAL PRIMARY KEY,
+    source_id TEXT NOT NULL,
+    table_name TEXT NOT NULL,
+    epoch BIGINT NOT NULL,
+    approved_db_user TEXT NOT NULL DEFAULT session_user,
+    approved_label TEXT,
+    approved_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (source_id, table_name, epoch, approved_db_user)
+);
+
+CREATE OR REPLACE FUNCTION meta.approve_cutover(p_source_id TEXT, p_table_name TEXT, p_label TEXT DEFAULT NULL)
+RETURNS BIGINT
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    o meta.ingestion_ownership%ROWTYPE;
+    v_id BIGINT;
+BEGIN
+    SELECT * INTO o FROM meta.ingestion_ownership WHERE source_id = p_source_id AND table_name = p_table_name;
+    IF NOT FOUND OR o.cutover_state <> 'CUTOVER_READY' THEN
+        RAISE EXCEPTION '%/% is not CUTOVER_READY', p_source_id, p_table_name USING ERRCODE = 'FBI03';
+    END IF;
+    IF o.shadow_requested_db_user IS NOT DISTINCT FROM session_user THEN
+        RAISE EXCEPTION 'The database login that requested the shadow (%) cannot approve its own cutover', session_user
+            USING ERRCODE = 'FBI03';
+    END IF;
+    INSERT INTO meta.cutover_approval (source_id, table_name, epoch, approved_label)
+    VALUES (p_source_id, p_table_name, o.epoch, p_label)
+    ON CONFLICT (source_id, table_name, epoch, approved_db_user) DO UPDATE SET approved_at = NOW()
+    RETURNING approval_id INTO v_id;
+    RETURN v_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION meta.guard_ownership_update()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_max_age INTEGER := meta.setting('reconciliation_max_age_minutes', '120')::INTEGER;
+    v_mode TEXT := meta.setting('dual_control_mode', 'parameter');
+    v_ok BOOLEAN;
+BEGIN
+    IF NEW.engine IS DISTINCT FROM OLD.engine THEN
+        IF OLD.engine = 'NONE' OR NEW.engine = 'NONE' THEN
+            NULL;
+        ELSIF OLD.shadow_engine IS NOT NULL AND NEW.engine = OLD.shadow_engine
+              AND NEW.shadow_engine IS NULL AND OLD.cutover_state = 'CUTOVER_READY' THEN
+            SELECT EXISTS (
+                SELECT 1 FROM meta.reconciliation_run r
+                WHERE r.reconciliation_id = OLD.last_reconciliation_id
+                  AND r.source_id = OLD.source_id
+                  AND r.table_name = OLD.table_name
+                  AND r.comparison = 'shadow_vs_prod'
+                  AND r.status = 'PASSED'
+                  AND r.finished_at > NOW() - make_interval(mins => v_max_age)
+            ) INTO v_ok;
+            IF NOT v_ok THEN
+                RAISE EXCEPTION 'Cutover of %/% needs a PASSED shadow_vs_prod reconciliation of this table newer than % minutes',
+                    OLD.source_id, OLD.table_name, v_max_age USING ERRCODE = 'FBI03';
+            END IF;
+            IF v_mode = 'database' THEN
+                SELECT EXISTS (
+                    SELECT 1 FROM meta.cutover_approval a
+                    WHERE a.source_id = OLD.source_id AND a.table_name = OLD.table_name AND a.epoch = OLD.epoch
+                      AND a.approved_db_user <> COALESCE(OLD.shadow_requested_db_user, '')
+                      AND a.approved_db_user <> session_user
+                ) INTO v_ok;
+                IF NOT v_ok THEN
+                    RAISE EXCEPTION 'Cutover of %/% needs an approval recorded by a different database login (meta.approve_cutover)',
+                        OLD.source_id, OLD.table_name USING ERRCODE = 'FBI03';
+                END IF;
+            END IF;
+        ELSIF COALESCE(current_setting('fbi.force_approved_by', TRUE), '') <> '' THEN
+            NULL;
+        ELSE
+            RAISE EXCEPTION 'Illegal engine change % -> % for %/%', OLD.engine, NEW.engine, OLD.source_id, OLD.table_name
+                USING ERRCODE = 'FBI03';
+        END IF;
+    END IF;
+    IF (NEW.engine IS DISTINCT FROM OLD.engine OR NEW.shadow_engine IS DISTINCT FROM OLD.shadow_engine)
+       AND NEW.epoch <= OLD.epoch THEN
+        RAISE EXCEPTION 'Ownership of %/% changed without a higher epoch', OLD.source_id, OLD.table_name
+            USING ERRCODE = 'FBI03';
+    END IF;
+    IF NEW.shadow_engine IS NOT NULL AND OLD.shadow_engine IS NULL THEN
+        NEW.shadow_requested_db_user := session_user;
+    ELSIF NEW.shadow_engine IS NULL THEN
+        NEW.shadow_requested_db_user := NULL;
+        NEW.shadow_requested_by := NULL;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_ownership_guard ON meta.ingestion_ownership;
+CREATE TRIGGER trg_ownership_guard
+    BEFORE UPDATE ON meta.ingestion_ownership
+    FOR EACH ROW EXECUTE FUNCTION meta.guard_ownership_update();
 
 CREATE OR REPLACE FUNCTION meta.ownership_lock_key(p_source_id TEXT, p_table_name TEXT)
 RETURNS BIGINT
 LANGUAGE sql
 STABLE
 AS $$
-    SELECT hashtextextended(
-        p_table_name || ':' || (
-            abs(hashtextextended(p_source_id, 0)) % meta.setting('ownership_lock_buckets', '64')::BIGINT
-        )::TEXT,
-        7
-    )
+    SELECT hashtextextended(p_table_name || chr(31) || p_source_id, 7)
 $$;
 
 CREATE OR REPLACE FUNCTION meta.lock_ownership_exclusive(p_source_id TEXT, p_table_name TEXT)
@@ -331,21 +479,204 @@ CREATE TABLE IF NOT EXISTS meta.ingestion_audit (
     PRIMARY KEY (table_name, writer_id, minute_bucket)
 );
 
+DO $$
+BEGIN
+    IF to_regclass('meta.entity_change_log') IS NOT NULL
+       AND (SELECT relkind FROM pg_class WHERE oid = to_regclass('meta.entity_change_log')) = 'r' THEN
+        ALTER TABLE meta.entity_change_log RENAME TO entity_change_log_legacy;
+        ALTER TABLE meta.entity_change_log_legacy RENAME CONSTRAINT entity_change_log_pkey TO entity_change_log_legacy_pkey;
+        ALTER SEQUENCE meta.entity_change_log_change_id_seq OWNED BY NONE;
+    END IF;
+END
+$$;
+
 CREATE TABLE IF NOT EXISTS meta.entity_change_log (
-    change_id BIGSERIAL PRIMARY KEY,
+    change_id BIGINT NOT NULL DEFAULT 0,
     source_id TEXT NOT NULL,
     tenant_id TEXT NOT NULL,
     entity TEXT NOT NULL CHECK (entity IN ('loan', 'client', 'global', 'source')),
     entity_id BIGINT NOT NULL,
     min_affected_date DATE NOT NULL,
-    changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+    changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    txid xid8 NOT NULL DEFAULT pg_current_xact_id(),
+    PRIMARY KEY (changed_at, change_id)
+) PARTITION BY RANGE (changed_at);
+
+CREATE SEQUENCE IF NOT EXISTS meta.entity_change_log_change_id_seq;
+ALTER TABLE meta.entity_change_log ALTER COLUMN change_id SET DEFAULT nextval('meta.entity_change_log_change_id_seq');
+
+CREATE TABLE IF NOT EXISTS meta.entity_change_log_default PARTITION OF meta.entity_change_log DEFAULT;
+
+CREATE INDEX IF NOT EXISTS ix_entity_change_log_txid ON meta.entity_change_log (txid);
+CREATE INDEX IF NOT EXISTS ix_entity_change_log_source ON meta.entity_change_log (source_id, entity, entity_id);
+
+CREATE OR REPLACE FUNCTION meta.ensure_change_log_partitions(p_days_back INTEGER DEFAULT 1, p_days_ahead INTEGER DEFAULT 3)
+RETURNS INTEGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = meta, pg_temp
+AS $$
+DECLARE
+    d DATE;
+    v_name TEXT;
+    n INTEGER := 0;
+BEGIN
+    FOR d IN SELECT generate_series(CURRENT_DATE - p_days_back, CURRENT_DATE + p_days_ahead, INTERVAL '1 day')::DATE LOOP
+        v_name := 'entity_change_log_' || to_char(d, 'YYYYMMDD');
+        IF to_regclass('meta.' || v_name) IS NULL THEN
+            IF EXISTS (
+                SELECT 1 FROM meta.entity_change_log_default
+                WHERE changed_at >= d::TIMESTAMPTZ AND changed_at < (d + 1)::TIMESTAMPTZ
+            ) THEN
+                EXECUTE format('CREATE TABLE meta.%I (LIKE meta.entity_change_log INCLUDING DEFAULTS INCLUDING CONSTRAINTS)', v_name);
+                EXECUTE format(
+                    'WITH moved AS (DELETE FROM meta.entity_change_log_default WHERE changed_at >= %L AND changed_at < %L '
+                    'RETURNING *) INSERT INTO meta.%I SELECT * FROM moved',
+                    d::TIMESTAMPTZ, (d + 1)::TIMESTAMPTZ, v_name);
+                EXECUTE format(
+                    'ALTER TABLE meta.entity_change_log ATTACH PARTITION meta.%I FOR VALUES FROM (%L) TO (%L)',
+                    v_name, d::TIMESTAMPTZ, (d + 1)::TIMESTAMPTZ);
+            ELSE
+                EXECUTE format(
+                    'CREATE TABLE meta.%I PARTITION OF meta.entity_change_log FOR VALUES FROM (%L) TO (%L)',
+                    v_name, d::TIMESTAMPTZ, (d + 1)::TIMESTAMPTZ);
+            END IF;
+            n := n + 1;
+        END IF;
+    END LOOP;
+    RETURN n;
+END;
+$$;
+
+DO $$
+BEGIN
+    IF to_regclass('meta.entity_change_log_legacy') IS NOT NULL THEN
+        INSERT INTO meta.entity_change_log (change_id, source_id, tenant_id, entity, entity_id, min_affected_date, changed_at, txid)
+        SELECT change_id, source_id, tenant_id, entity, entity_id, min_affected_date, changed_at, '0'::xid8
+        FROM meta.entity_change_log_legacy;
+        PERFORM setval('meta.entity_change_log_change_id_seq',
+                       GREATEST((SELECT COALESCE(MAX(change_id), 0) FROM meta.entity_change_log_legacy), 1));
+        DROP TABLE meta.entity_change_log_legacy;
+    END IF;
+END
+$$;
+
+SELECT meta.ensure_change_log_partitions();
 
 CREATE TABLE IF NOT EXISTS meta.dbt_change_cursor (
     model_name TEXT PRIMARY KEY,
     last_change_id BIGINT NOT NULL DEFAULT 0,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE meta.dbt_change_cursor ADD COLUMN IF NOT EXISTS last_txid xid8 NOT NULL DEFAULT '0'::xid8;
+ALTER TABLE meta.dbt_change_cursor ADD COLUMN IF NOT EXISTS last_run_id BIGINT NOT NULL DEFAULT 0;
+
+CREATE SEQUENCE IF NOT EXISTS meta.dbt_run_seq;
+
+CREATE TABLE IF NOT EXISTS meta.dbt_mart_cursor (
+    model_name TEXT PRIMARY KEY,
+    last_run_id BIGINT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS meta.dbt_mart_dirty (
+    run_id BIGINT NOT NULL,
+    source_id TEXT NOT NULL,
+    office_id BIGINT,
+    product_id BIGINT,
+    from_date DATE NOT NULL,
+    changed_from DATE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_dbt_mart_dirty_run ON meta.dbt_mart_dirty (run_id);
+
+CREATE OR REPLACE FUNCTION meta.change_log_horizon()
+RETURNS xid8
+LANGUAGE sql
+VOLATILE
+AS $$
+    SELECT pg_snapshot_xmin(pg_current_snapshot())
+$$;
+
+CREATE OR REPLACE FUNCTION meta.purge_change_log(p_retention_days INTEGER DEFAULT NULL)
+RETURNS INTEGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = meta, pg_temp
+AS $$
+DECLARE
+    v_days INTEGER := COALESCE(p_retention_days, meta.setting('change_log_retention_days', '14')::INTEGER);
+    v_stale INTEGER := meta.setting('cursor_stale_days', '7')::INTEGER;
+    v_floor xid8;
+    r RECORD;
+    v_bound DATE;
+    v_has_pending BOOLEAN;
+    n INTEGER := 0;
+BEGIN
+    SELECT MIN(last_txid) INTO v_floor
+    FROM meta.dbt_change_cursor
+    WHERE updated_at > NOW() - make_interval(days => v_stale);
+    IF v_floor IS NULL THEN
+        RETURN 0;
+    END IF;
+    PERFORM meta.ensure_change_log_partitions();
+    FOR r IN
+        SELECT c.relname
+        FROM pg_inherits i
+        JOIN pg_class c ON c.oid = i.inhrelid
+        WHERE i.inhparent = 'meta.entity_change_log'::regclass
+          AND c.relname ~ '^entity_change_log_[0-9]{8}$'
+    LOOP
+        v_bound := to_date(right(r.relname, 8), 'YYYYMMDD');
+        IF v_bound + 1 > (NOW() - make_interval(days => v_days))::DATE THEN
+            CONTINUE;
+        END IF;
+        EXECUTE format('SELECT EXISTS (SELECT 1 FROM meta.%I WHERE txid >= $1)', r.relname) INTO v_has_pending USING v_floor;
+        IF NOT v_has_pending THEN
+            EXECUTE format('DROP TABLE meta.%I', r.relname);
+            n := n + 1;
+        END IF;
+    END LOOP;
+    DELETE FROM meta.entity_change_log_default
+    WHERE changed_at < NOW() - make_interval(days => v_days) AND txid < v_floor;
+    RETURN n;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION meta.purge_progress(p_days INTEGER DEFAULT NULL)
+RETURNS BIGINT
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_days INTEGER := COALESCE(p_days, meta.setting('progress_retention_days', '7')::INTEGER);
+    v_a BIGINT;
+    v_b BIGINT;
+BEGIN
+    DELETE FROM meta.ingestion_progress WHERE last_applied_at < NOW() - make_interval(days => v_days);
+    GET DIAGNOSTICS v_a = ROW_COUNT;
+    DELETE FROM meta.ingestion_audit WHERE minute_bucket < NOW() - make_interval(days => v_days);
+    GET DIAGNOSTICS v_b = ROW_COUNT;
+    RETURN v_a + v_b;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION meta.purge_ownership_audit(p_days INTEGER DEFAULT NULL)
+RETURNS BIGINT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = meta, pg_temp
+AS $$
+DECLARE
+    v_days INTEGER := COALESCE(p_days, meta.setting('ownership_audit_retention_days', '730')::INTEGER);
+    v_n BIGINT;
+BEGIN
+    PERFORM set_config('fbi.audit_maintenance', 'on', TRUE);
+    DELETE FROM meta.ingestion_ownership_audit WHERE created_at < NOW() - make_interval(days => v_days);
+    GET DIAGNOSTICS v_n = ROW_COUNT;
+    PERFORM set_config('fbi.audit_maintenance', 'off', TRUE);
+    RETURN v_n;
+END;
+$$;
 
 CREATE TABLE IF NOT EXISTS meta.reconciliation_run (
     reconciliation_id BIGSERIAL PRIMARY KEY,
@@ -375,6 +706,9 @@ CREATE TABLE IF NOT EXISTS meta.connector_state (
     config_hash TEXT,
     observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE meta.connector_state ADD COLUMN IF NOT EXISTS slot_checked_at TIMESTAMPTZ;
+ALTER TABLE meta.connector_state ADD COLUMN IF NOT EXISTS slot_check_key TEXT;
 
 CREATE TABLE IF NOT EXISTS meta.pipeline_state (
     run_id UUID PRIMARY KEY,
@@ -459,6 +793,14 @@ DECLARE
     v_has_unavailable BOOLEAN;
     v_pk TEXT;
     v_rc BIGINT;
+    v_deleted2 BIGINT;
+    v_merge_cols TEXT;
+    v_unavail_expr TEXT;
+    v_hist TEXT;
+    v_changed TEXT;
+    v_old TEXT := '';
+    v_old_sql TEXT;
+    v_use_log BOOLEAN;
 BEGIN
     IF p_engine NOT IN ('PYTHON', 'KAFKA') THEN
         RAISE EXCEPTION 'Unknown engine %', p_engine USING ERRCODE = '22023';
@@ -518,35 +860,90 @@ BEGIN
         ELSE 'TRUE'
     END;
 
-    v_dedup := format(
-        'SELECT DISTINCT ON (source_id, tenant_id, %1$s) * FROM pg_temp.%2$I WHERE _target = $2 '
-        || 'ORDER BY source_id, tenant_id, %1$s, _source_generation DESC, _source_lsn DESC NULLS LAST, _stage_seq DESC',
-        v_pk, v_stage
-    );
-
     EXECUTE format('SELECT EXISTS (SELECT 1 FROM pg_temp.%I WHERE cardinality(_unavailable) > 0)', v_stage)
         INTO v_has_unavailable;
 
-    v_log := CASE
-        WHEN c.change_entity IN ('loan', 'client') THEN format(
-            'INSERT INTO meta.entity_change_log (source_id, tenant_id, entity, entity_id, min_affected_date) '
-            || 'SELECT source_id, tenant_id, %L, %I, MIN(LEAST(COALESCE(%s, DATE ''1900-01-01''), CURRENT_DATE)) '
-            || 'FROM applied WHERE %I IS NOT NULL GROUP BY source_id, tenant_id, %I RETURNING 1',
-            c.change_entity, c.change_key,
-            CASE WHEN c.change_date IS NULL THEN 'NULL::date' ELSE quote_ident(c.change_date) END,
-            c.change_key, c.change_key)
-        WHEN c.change_entity = 'global' THEN
-            'INSERT INTO meta.entity_change_log (source_id, tenant_id, entity, entity_id, min_affected_date) '
+    IF v_has_unavailable THEN
+        SELECT string_agg(
+                   format('(array_agg(%1$I ORDER BY _source_generation DESC, _source_lsn DESC NULLS LAST, _stage_seq DESC) '
+                          || 'FILTER (WHERE %1$L <> ALL(COALESCE(_unavailable, ARRAY[]::TEXT[]))))[1] AS %1$I',
+                          col ->> 'name'),
+                   ', ' ORDER BY ord) FILTER (WHERE col ->> 'name' <> c.primary_key),
+               string_agg(
+                   format('CASE WHEN NOT bool_or(%1$L <> ALL(COALESCE(_unavailable, ARRAY[]::TEXT[]))) THEN %1$L END',
+                          col ->> 'name'),
+                   ', ' ORDER BY ord) FILTER (WHERE col ->> 'name' <> c.primary_key)
+          INTO v_merge_cols, v_unavail_expr
+          FROM jsonb_array_elements(c.columns) WITH ORDINALITY AS x(col, ord);
+
+        v_dedup := format(
+            'SELECT source_id, tenant_id, %1$s, %2$s, '
+            || '(array_agg(_source_generation ORDER BY _source_generation DESC, _source_lsn DESC NULLS LAST, _stage_seq DESC))[1] AS _source_generation, '
+            || '(array_agg(_source_lsn ORDER BY _source_generation DESC, _source_lsn DESC NULLS LAST, _stage_seq DESC))[1] AS _source_lsn, '
+            || '(array_agg(_source_ts ORDER BY _source_generation DESC, _source_lsn DESC NULLS LAST, _stage_seq DESC))[1] AS _source_ts, '
+            || '(array_agg(_op ORDER BY _source_generation DESC, _source_lsn DESC NULLS LAST, _stage_seq DESC))[1] AS _op, '
+            || 'array_remove(ARRAY[%3$s]::TEXT[], NULL) AS _unavailable '
+            || 'FROM pg_temp.%4$I WHERE _target = $2 GROUP BY source_id, tenant_id, %1$s',
+            v_pk, v_merge_cols, v_unavail_expr, v_stage
+        );
+    ELSE
+        v_dedup := format(
+            'SELECT DISTINCT ON (source_id, tenant_id, %1$s) * FROM pg_temp.%2$I WHERE _target = $2 '
+            || 'ORDER BY source_id, tenant_id, %1$s, _source_generation DESC, _source_lsn DESC NULLS LAST, _stage_seq DESC',
+            v_pk, v_stage
+        );
+    END IF;
+
+    IF c.change_entity IN ('loan', 'client') THEN
+        IF c.change_history_columns IS NULL OR jsonb_array_length(c.change_history_columns) = 0 THEN
+            v_hist := 'TRUE';
+        ELSE
+            SELECT '(' || string_agg(format('a.%I', h), ', ') || ') IS DISTINCT FROM ('
+                       || string_agg(format('o.%I', h), ', ') || ')'
+              INTO v_hist
+              FROM jsonb_array_elements_text(c.change_history_columns) AS h;
+        END IF;
+        v_changed := format('(o.%1$I IS NULL OR a._is_deleted IS DISTINCT FROM o._is_deleted OR %2$s)', c.primary_key, v_hist);
+        v_old := format(
+            ', old AS (SELECT o0.* FROM %%1$I.%%2$I o0 JOIN dedup d ON o0.source_id = d.source_id '
+            || 'AND o0.tenant_id = d.tenant_id AND o0.%1$s = d.%1$s)', v_pk);
+        IF c.change_entity = 'loan' THEN
+            v_log := format(
+                'INSERT INTO meta.entity_change_log (source_id, tenant_id, entity, entity_id, min_affected_date) '
+                || 'SELECT a.source_id, a.tenant_id, ''loan'', a.%1$I, MIN(CASE WHEN %2$s THEN '
+                || 'LEAST(COALESCE(%3$s, DATE ''1900-01-01''), COALESCE(%4$s, DATE ''9999-12-31''), CURRENT_DATE) '
+                || 'ELSE CURRENT_DATE END) '
+                || 'FROM applied a LEFT JOIN old o ON o.source_id = a.source_id AND o.tenant_id = a.tenant_id '
+                || 'AND o.%5$I = a.%5$I WHERE a.%1$I IS NOT NULL GROUP BY a.source_id, a.tenant_id, a.%1$I RETURNING 1',
+                c.change_key, v_changed,
+                CASE WHEN c.change_date IS NULL THEN 'NULL::date' ELSE format('a.%I', c.change_date) END,
+                CASE WHEN c.change_date IS NULL THEN 'NULL::date' ELSE format('o.%I', c.change_date) END,
+                c.primary_key);
+        ELSE
+            v_log := format(
+                'INSERT INTO meta.entity_change_log (source_id, tenant_id, entity, entity_id, min_affected_date) '
+                || 'SELECT a.source_id, a.tenant_id, ''client'', a.%1$I, DATE ''1900-01-01'' '
+                || 'FROM applied a LEFT JOIN old o ON o.source_id = a.source_id AND o.tenant_id = a.tenant_id '
+                || 'AND o.%2$I = a.%2$I WHERE a.%1$I IS NOT NULL AND %3$s RETURNING 1',
+                c.change_key, c.primary_key, v_changed);
+        END IF;
+    ELSIF c.change_entity = 'global' THEN
+        v_old := '';
+        v_log := 'INSERT INTO meta.entity_change_log (source_id, tenant_id, entity, entity_id, min_affected_date) '
             || 'SELECT source_id, tenant_id, ''global'', 0, DATE ''1900-01-01'' FROM applied '
-            || 'GROUP BY source_id, tenant_id RETURNING 1'
-        ELSE NULL
-    END;
+            || 'GROUP BY source_id, tenant_id RETURNING 1';
+    ELSE
+        v_old := '';
+        v_log := NULL;
+    END IF;
 
     FOREACH v_target IN ARRAY ARRAY['prod', 'shadow'] LOOP
         v_schema := CASE v_target WHEN 'prod' THEN 'raw' ELSE 'raw_shadow' END;
+        v_use_log := v_log IS NOT NULL AND v_target = 'prod';
+        v_old_sql := CASE WHEN v_use_log AND v_old <> '' THEN format(v_old, v_schema, c.raw_table) ELSE '' END;
 
         EXECUTE format($q$
-            WITH dedup AS (%1$s),
+            WITH dedup AS (%1$s)%10$s,
             applied AS (
                 INSERT INTO %2$I.%3$I AS t (
                     source_id, tenant_id, %4$s,
@@ -571,41 +968,50 @@ BEGIN
         $q$,
             v_dedup, v_schema, c.raw_table, v_cols, v_sel_cols, v_pk, v_set,
             format(v_guard, 'EXCLUDED'),
-            CASE WHEN v_log IS NOT NULL AND v_target = 'prod' THEN ', logged AS (' || v_log || ')' ELSE '' END
+            CASE WHEN v_use_log THEN ', logged AS (' || v_log || ')' ELSE '' END,
+            v_old_sql
         ) INTO v_applied, v_deleted USING p_engine, v_target;
 
         IF v_has_unavailable THEN
             EXECUTE format($q$
-                WITH dedup AS (%1$s)
-                INSERT INTO %2$I.%3$I AS t (
-                    source_id, tenant_id, %4$s,
-                    _source_generation, _source_lsn, _source_ts, _ingested_at, _ingest_engine, _is_deleted
-                )
-                SELECT d.source_id, d.tenant_id, %5$s,
-                       d._source_generation, d._source_lsn, d._source_ts, NOW(), $1, d._op = 'd'
-                FROM dedup d
-                WHERE cardinality(d._unavailable) > 0
-                ON CONFLICT (source_id, tenant_id, %6$s) DO NOTHING
-            $q$, v_dedup, v_schema, c.raw_table, v_cols, v_sel_cols, v_pk) USING p_engine, v_target;
-
-            EXECUTE format($q$
-                WITH dedup AS (%1$s)
-                UPDATE %2$I.%3$I AS t
-                SET %4$s,
-                    _source_generation = d._source_generation,
-                    _source_lsn = d._source_lsn,
-                    _source_ts = d._source_ts,
-                    _ingested_at = NOW(),
-                    _ingest_engine = $1,
-                    _is_deleted = d._op = 'd'
-                FROM dedup d
-                WHERE cardinality(d._unavailable) > 0
-                  AND t.source_id = d.source_id AND t.tenant_id = d.tenant_id AND t.%5$s = d.%5$s
-                  AND %6$s
-            $q$, v_dedup, v_schema, c.raw_table, v_set_unavailable, v_pk, format(v_guard, 'd'))
-            USING p_engine, v_target;
-            GET DIAGNOSTICS v_rc = ROW_COUNT;
+                WITH dedup AS (%1$s)%10$s,
+                ins AS (
+                    INSERT INTO %2$I.%3$I AS t (
+                        source_id, tenant_id, %4$s,
+                        _source_generation, _source_lsn, _source_ts, _ingested_at, _ingest_engine, _is_deleted
+                    )
+                    SELECT d.source_id, d.tenant_id, %5$s,
+                           d._source_generation, d._source_lsn, d._source_ts, NOW(), $1, d._op = 'd'
+                    FROM dedup d
+                    WHERE cardinality(d._unavailable) > 0
+                    ON CONFLICT (source_id, tenant_id, %6$s) DO NOTHING
+                    RETURNING t.*
+                ),
+                upd AS (
+                    UPDATE %2$I.%3$I AS t
+                    SET %7$s,
+                        _source_generation = d._source_generation,
+                        _source_lsn = d._source_lsn,
+                        _source_ts = d._source_ts,
+                        _ingested_at = NOW(),
+                        _ingest_engine = $1,
+                        _is_deleted = d._op = 'd'
+                    FROM dedup d
+                    WHERE cardinality(d._unavailable) > 0
+                      AND t.source_id = d.source_id AND t.tenant_id = d.tenant_id AND t.%6$s = d.%6$s
+                      AND %8$s
+                    RETURNING t.*
+                ),
+                applied AS (SELECT * FROM ins UNION ALL SELECT * FROM upd)%9$s
+                SELECT COUNT(*), COUNT(*) FILTER (WHERE _is_deleted) FROM applied
+            $q$,
+                v_dedup, v_schema, c.raw_table, v_cols, v_sel_cols, v_pk, v_set_unavailable,
+                format(v_guard, 'd'),
+                CASE WHEN v_use_log THEN ', logged AS (' || v_log || ')' ELSE '' END,
+                v_old_sql
+            ) INTO v_rc, v_deleted2 USING p_engine, v_target;
             v_applied := v_applied + v_rc;
+            v_deleted := v_deleted + v_deleted2;
         END IF;
 
         IF v_applied > 0 THEN

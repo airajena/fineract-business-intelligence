@@ -27,9 +27,15 @@ public record ChangeEvent(
         String[] values,
         List<String> unavailable,
         Long lsn,
-        long sourceTsMicros) {
+        long sourceTsMicros,
+        List<String> absent) {
 
     public enum Op {
         UPSERT, DELETE
+    }
+
+    public ChangeEvent(String sourceId, String table, Op op, String[] values, List<String> unavailable, Long lsn,
+            long sourceTsMicros) {
+        this(sourceId, table, op, values, unavailable, lsn, sourceTsMicros, List.of());
     }
 }

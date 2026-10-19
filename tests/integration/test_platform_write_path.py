@@ -9,6 +9,9 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 
 from __future__ import annotations
@@ -53,6 +56,27 @@ def _available() -> bool:
 pytestmark = pytest.mark.skipif(not _available(), reason="warehouse database not reachable")
 
 
+def _admin_cfg() -> PgConfig:
+    return PgConfig(
+        host=os.getenv("WAREHOUSE_DB_HOST", "localhost"),
+        port=int(os.getenv("WAREHOUSE_DB_PORT", "5434")),
+        database=os.getenv("WAREHOUSE_DB_NAME", "analytics"),
+        user=os.getenv("WAREHOUSE_ADMIN_USER", "analytics_admin"),
+        password=os.getenv("WAREHOUSE_ADMIN_PASSWORD", "analytics_admin_dev_only"),
+    )
+
+
+def purge_audit(sid):
+    admin = connect(_admin_cfg())
+    try:
+        cur = admin.cursor()
+        cur.execute("SET fbi.audit_maintenance = 'on'")
+        cur.execute("DELETE FROM meta.ingestion_ownership_audit WHERE source_id = %s", (sid,))
+        admin.commit()
+    finally:
+        admin.close()
+
+
 @pytest.fixture
 def conn():
     c = connect(_cfg())
@@ -73,9 +97,23 @@ def source(conn):
     for schema in ("raw", "raw_shadow"):
         cur.execute(f"DELETE FROM {schema}.raw_batch_job_instance WHERE source_id = %s", (sid,))
     cur.execute("DELETE FROM meta.entity_change_log WHERE source_id = %s", (sid,))
-    cur.execute("DELETE FROM meta.ingestion_ownership_audit WHERE source_id = %s", (sid,))
     cur.execute("DELETE FROM meta.source_registry WHERE source_id = %s", (sid,))
     conn.commit()
+    purge_audit(sid)
+
+
+def passed_run(conn, sid, table=TABLE, status="PASSED", age="0 seconds"):
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO meta.reconciliation_run (source_id, table_name, comparison, status, compared_rows, "
+        "mismatched_rows, missing_left, missing_right, started_at, finished_at) "
+        "VALUES (%s, %s, 'shadow_vs_prod', %s, 0, 0, 0, 0, NOW() - %s::interval, NOW() - %s::interval) "
+        "RETURNING reconciliation_id",
+        (sid, table, status, age, age),
+    )
+    rid = int(cur.fetchone()[0])
+    conn.commit()
+    return rid
 
 
 def assign(conn, sid, engine):
@@ -209,7 +247,8 @@ def test_in_flight_writer_batch_cannot_straddle_a_cutover(conn, source):
     repo.apply(source, [TABLE], TransitionRequest(Action.START_SHADOW, "alice", "m", engine=Engine.KAFKA))
     repo.apply(source, [TABLE], TransitionRequest(Action.BEGIN_RECONCILIATION, "alice", "m"))
     repo.apply(source, [TABLE], TransitionRequest(Action.RECORD_RECONCILIATION, "alice", "m",
-                                                  reconciliation_passed=True, reconciliation_id=1))
+                                                  reconciliation_passed=True,
+                                                  reconciliation_id=passed_run(conn, source)))
 
     writer = connect(_cfg())
     try:

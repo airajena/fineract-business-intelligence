@@ -13,14 +13,14 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 
--- depends_on: {{ ref('int_snapshot_scope') }}
+-- depends_on: {{ ref('int_change_window') }}
 {{
     config(
         materialized='incremental',
         incremental_strategy='append',
         on_schema_change='append_new_columns',
         indexes=[{'columns': ['source_id', 'snapshot_date']}, {'columns': ['snapshot_date', 'bucket_key']}],
-        pre_hook=["{{ heavy_model_settings() }}", "{{ mart_delete_recompute_window('snapshot_date') }}"]
+        pre_hook=["{{ heavy_model_settings() }}", "{{ mart_delete_recompute_window('mart_delinquency_par', 'snapshot_date') }}"]
     )
 }}
 
@@ -45,9 +45,11 @@ with portfolio_base as (
         f.bucket_name
     from {{ ref('fact_loan_snapshot') }} as f
     {% if is_incremental() %}
-        inner join ({{ mart_recompute_window('snapshot_date') }}) as w
+        inner join ({{ mart_recompute_window('mart_delinquency_par') }}) as w
             on
                 f.source_id = w.source_id
+                and f.office_id is not distinct from w.office_id
+                and f.product_id is not distinct from w.product_id
                 and f.snapshot_date >= w.recompute_from
     {% endif %}
 ),
